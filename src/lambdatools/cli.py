@@ -23,6 +23,7 @@ COMMANDS = {
     "scan": ("lambdatools.scan", "check dependencies for known vulnerabilities (OSV.dev)"),
     "remediate": ("lambdatools.remediate", "upgrade vulnerable dependencies to fixed versions"),
     "package": ("lambdatools.package", "build a versioned deployment zip and update the changelog"),
+    "import": ("lambdatools.importer", "turn a backup into a project directory for remediate and package"),
 }
 
 

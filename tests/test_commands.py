@@ -331,7 +331,7 @@ def test_root_backups_dir_is_never_packaged_or_scanned(tmp_path):
 
 # --- backups as scan input ------------------------------------------------------
 
-def _fake_backup(root: Path, layers=(), code=None, tamper=False):
+def _fake_backup(root: Path, layers=(), code=None, tamper=False, runtime="python3.12", handler="handler.handler"):
     import hashlib
     root.mkdir(parents=True)
     buf = io.BytesIO()
@@ -345,7 +345,7 @@ def _fake_backup(root: Path, layers=(), code=None, tamper=False):
         "code.zip": buf.getvalue(),
         "function.json": json.dumps({"Configuration": {
             "FunctionName": "orders-api", "FunctionArn": "arn:aws:lambda:us-east-1:123456789012:function:orders-api",
-            "Runtime": "python3.12", "Architectures": ["arm64"], "Handler": "handler.handler",
+            "Runtime": runtime, "Architectures": ["arm64"], "Handler": handler, "CodeSha256": "abc=",
             "Layers": [{"Arn": a} for a in layers]}}).encode(),
     }
     import hashlib
@@ -392,3 +392,288 @@ def test_scan_dir_with_only_archives_is_a_gap(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(urllib.request, "urlopen", FakeOsv())
     assert scan.run(_scan_args(tmp_path), None) == 1
     assert "archives are not opened" in json.loads(capsys.readouterr().out)["coverage_gaps"][0]
+
+
+def _import_args(backup_dir, to, execute=True):
+    return argparse.Namespace(backup=backup_dir, to=to, execute=execute)
+
+
+PY_CODE = {
+    "handler.py": "import requests\n",
+    "lib/util.py": "X = 1\n",
+    "requests/__init__.py": "",
+    "requests/api.py": "",
+    "requests/__pycache__/api.cpython-312.pyc": "",
+    "requests-2.25.0.dist-info/METADATA": "Metadata-Version: 2.1\nName: requests\nVersion: 2.25.0\n",
+    "requests-2.25.0.dist-info/RECORD": "requests/__init__.py,sha256=47DEQpj8HBSa-_TImW-5JCeuQeRkm5NMpJWZG3hSuFU,0\nrequests/api.py,sha256=47DEQpj8HBSa-_TImW-5JCeuQeRkm5NMpJWZG3hSuFU,0\n"
+                                        "requests-2.25.0.dist-info/METADATA,,\n../../bin/evil,,\n../../bin/req,sha256=47DEQpj8HBSa-_TImW-5JCeuQeRkm5NMpJWZG3hSuFU,0\n",
+    "bin/req": "",
+    "six.py": "",
+    "six-1.16.0.dist-info/METADATA": "Name: six\nVersion: 1.16.0\n",
+    "six-1.16.0.dist-info/top_level.txt": "six\n",
+}
+
+
+def test_import_python_backup(tmp_path, capsys):
+    from lambdatools import importer
+    exe = zipfile.ZipInfo("bin/run.sh")
+    exe.external_attr = 0o755 << 16
+    code = dict(PY_CODE)
+    code[exe] = "#!/bin/sh\n"
+    backup_dir = _fake_backup(tmp_path / "b", code=code)
+    dest = tmp_path / "proj"
+    assert importer.run(_import_args(backup_dir, dest), None) == 0
+    files = sorted(str(p.relative_to(dest)) for p in dest.rglob("*") if p.is_file())
+    assert files == ["CHANGELOG.md", "bin/run.sh", "handler.py", "lambda-tools.json", "lib/util.py", "requirements.txt"]
+    reqs = (dest / "requirements.txt").read_text()
+    assert "requests==2.25.0\nsix==1.16.0\n" in reqs
+    cfg = json.loads((dest / "lambda-tools.json").read_text())
+    assert cfg == {"name": "orders-api", "function_name": "orders-api", "runtime": "python3.12",
+                   "architecture": "arm64", "version": "0.0.0", "handler": "handler.handler",
+                   "account_id": "123456789012", "region": "us-east-1"}
+    assert "Imported from backup 20261113T000000Z" in (dest / "CHANGELOG.md").read_text()
+    assert os.stat(dest / "bin/run.sh").st_mode & 0o111
+    assert not os.stat(dest / "handler.py").st_mode & 0o111
+    out = json.loads(capsys.readouterr().out)
+    assert out["written"] and out["pinned"] == ["requests==2.25.0", "six==1.16.0"]
+    # remediate can rewrite the generated pins
+    assert remediate.rewrite_pin(reqs, "requests", "2.31.0") == (reqs.replace("2.25.0", "2.31.0"), "pinned")
+
+
+def test_import_dry_run_writes_nothing(tmp_path, capsys):
+    from lambdatools import importer
+    backup_dir = _fake_backup(tmp_path / "b", code=PY_CODE)
+    assert importer.run(_import_args(backup_dir, tmp_path / "proj", execute=False), None) == 0
+    assert not (tmp_path / "proj").exists()
+    assert "requirements.txt" in json.loads(capsys.readouterr().out)["files"]
+
+
+def test_import_refuses_non_empty_destination(tmp_path):
+    from lambdatools import importer
+    backup_dir = _fake_backup(tmp_path / "b", code=PY_CODE)
+    (tmp_path / "proj").mkdir()
+    (tmp_path / "proj" / "keep.txt").write_text("x")
+    with pytest.raises(ToolError, match="not empty"):
+        importer.run(_import_args(backup_dir, tmp_path / "proj"), None)
+    assert (tmp_path / "proj" / "keep.txt").read_text() == "x"
+
+
+def test_import_into_empty_destination(tmp_path, capsys):
+    from lambdatools import importer
+    backup_dir = _fake_backup(tmp_path / "b", code=PY_CODE)
+    (tmp_path / "proj").mkdir()
+    assert importer.run(_import_args(backup_dir, tmp_path / "proj"), None) == 0
+    assert (tmp_path / "proj" / "handler.py").exists()
+
+
+def test_import_keeps_existing_requirements(tmp_path, capsys):
+    from lambdatools import importer
+    code = dict(PY_CODE, **{"requirements.txt": "requests\n"})
+    backup_dir = _fake_backup(tmp_path / "b", code=code)
+    importer.run(_import_args(backup_dir, tmp_path / "proj"), None)
+    assert (tmp_path / "proj" / "requirements.txt").read_text() == "requests\n"
+    assert "requests==2.25.0" in (tmp_path / "proj" / "requirements.deployed.txt").read_text()
+
+
+def test_import_dist_info_without_record_or_top_level_keeps_files(tmp_path, capsys):
+    from lambdatools import importer
+    from lambdatools.common.log import WARNINGS
+    code = {"handler.py": "", "mystery/__init__.py": "",
+            "mystery-1.0.dist-info/METADATA": "Name: mystery\nVersion: 1.0\n"}
+    backup_dir = _fake_backup(tmp_path / "b", code=code)
+    importer.run(_import_args(backup_dir, tmp_path / "proj"), None)
+    assert (tmp_path / "proj" / "mystery" / "__init__.py").exists()
+    assert not (tmp_path / "proj" / "requirements.txt").exists()
+    assert any("cannot be separated" in m for m in WARNINGS._items["import"])
+
+
+def test_import_node_needs_lockfile(tmp_path):
+    from lambdatools import importer
+    code = {"index.js": "", "package.json": "{}", "node_modules/lodash/index.js": ""}
+    backup_dir = _fake_backup(tmp_path / "b", code=code, runtime="nodejs20.x", handler="index.handler")
+    with pytest.raises(ToolError, match="package-lock.json"):
+        importer.run(_import_args(backup_dir, tmp_path / "proj"), None)
+
+
+def test_import_node_drops_node_modules(tmp_path, capsys):
+    from lambdatools import importer
+    code = {"index.js": "", "package.json": "{}", "package-lock.json": "{}", "node_modules/lodash/index.js": ""}
+    backup_dir = _fake_backup(tmp_path / "b", code=code, runtime="nodejs20.x", handler="index.handler")
+    importer.run(_import_args(backup_dir, tmp_path / "proj"), None)
+    assert (tmp_path / "proj" / "package-lock.json").exists()
+    assert not (tmp_path / "proj" / "node_modules").exists()
+    assert not (tmp_path / "proj" / "requirements.txt").exists()
+
+
+def test_import_rejects_tampered_backup(tmp_path):
+    from lambdatools import importer
+    backup_dir = _fake_backup(tmp_path / "b", code=PY_CODE, tamper=True)
+    with pytest.raises(ToolError, match="checksum"):
+        importer.run(_import_args(backup_dir, tmp_path / "proj"), None)
+
+
+def _record_line(path, data):
+    import base64
+    import hashlib
+    digest = base64.urlsafe_b64encode(hashlib.sha256(data.encode()).digest()).rstrip(b"=").decode()
+    return f"{path},sha256={digest},{len(data)}\n"
+
+
+def _import_warnings():
+    from lambdatools.common.log import WARNINGS
+    return " | ".join(WARNINGS._items["import"])
+
+
+def test_import_keeps_patched_dependency_files(tmp_path, capsys):
+    from lambdatools import importer
+    code = {"handler.py": "", "lib1/__init__.py": "patched\n", "lib1/core.py": "x\n",
+            "lib1-1.0.dist-info/METADATA": "Name: lib1\nVersion: 1.0\n",
+            "lib1-1.0.dist-info/RECORD": _record_line("lib1/__init__.py", "original\n") + _record_line("lib1/core.py", "x\n")}
+    importer.run(_import_args(_fake_backup(tmp_path / "b", code=code), tmp_path / "p"), None)
+    assert (tmp_path / "p/lib1/__init__.py").read_text() == "patched\n"
+    assert not (tmp_path / "p/lib1/core.py").exists()
+    assert "differs from the hash" in _import_warnings()
+
+
+def test_import_top_level_fallback_is_narrow(tmp_path, capsys):
+    from lambdatools import importer
+    code = {"handler.py": "", "tests/test_x.py": "", "foo/__init__.py": "", "foo.json": "{}",
+            "foo-1.0.dist-info/METADATA": "Name: foo\nVersion: 1.0\n",
+            "foo-1.0.dist-info/top_level.txt": "foo\ntests\n"}
+    importer.run(_import_args(_fake_backup(tmp_path / "b", code=code), tmp_path / "p"), None)
+    assert (tmp_path / "p/tests/test_x.py").exists() and (tmp_path / "p/foo.json").exists()
+    assert not (tmp_path / "p/foo").exists()
+
+
+def test_import_refuses_when_handler_would_be_lost(tmp_path):
+    from lambdatools import importer
+    code = {"handler.pyc": "", "x-1.0.dist-info/METADATA": "Name: x\nVersion: 1.0\n"}
+    with pytest.raises(ToolError, match="handler"):
+        importer.run(_import_args(_fake_backup(tmp_path / "b", code=code), tmp_path / "p"), None)
+    assert not (tmp_path / "p").exists()
+
+
+def test_import_keeps_zip_changelog_and_config(tmp_path, capsys):
+    from lambdatools import importer
+    code = dict(PY_CODE, **{"CHANGELOG.md": "mine\n", "lambda-tools.json": '{"version": "3.1.0"}'})
+    importer.run(_import_args(_fake_backup(tmp_path / "b", code=code), tmp_path / "p"), None)
+    assert (tmp_path / "p/CHANGELOG.md").read_text() == "mine\n"
+    assert "3.1.0" in (tmp_path / "p/lambda-tools.json").read_text()
+
+
+def test_import_warns_without_dist_info(tmp_path, capsys):
+    from lambdatools import importer
+    code = {"handler.py": "", "requests/__init__.py": ""}
+    importer.run(_import_args(_fake_backup(tmp_path / "b", code=code), tmp_path / "p"), None)
+    assert "requirements.txt is empty" in _import_warnings()
+
+
+def test_import_warns_on_files_outside_record(tmp_path, capsys):
+    from lambdatools import importer
+    code = dict(PY_CODE, **{"requests/extra.py": ""})
+    importer.run(_import_args(_fake_backup(tmp_path / "b", code=code), tmp_path / "p"), None)
+    assert (tmp_path / "p/requests/extra.py").exists()
+    assert "not in its RECORD" in _import_warnings()
+
+
+def test_import_refuses_duplicate_installs(tmp_path):
+    from lambdatools import importer
+    code = dict(PY_CODE, **{"requests-2.31.0.dist-info/METADATA": "Name: requests\nVersion: 2.31.0\n"})
+    with pytest.raises(ToolError, match="two installs"):
+        importer.run(_import_args(_fake_backup(tmp_path / "b", code=code), tmp_path / "p"), None)
+
+
+def test_import_leaves_out_credential_files(tmp_path, capsys):
+    from lambdatools import importer
+    code = dict(PY_CODE, **{".env": "SECRET=1", "conf/.npmrc": "_authToken=x", "key.pem": ""})
+    importer.run(_import_args(_fake_backup(tmp_path / "b", code=code), tmp_path / "p"), None)
+    for name in (".env", "conf/.npmrc", "key.pem"):
+        assert not (tmp_path / "p" / name).exists()
+    assert "credential file" in _import_warnings()
+
+
+def test_import_case_collision_fails_in_dry_run(tmp_path):
+    from lambdatools import importer
+    code = dict(PY_CODE, **{"Handler.py": ""})
+    with pytest.raises(ToolError, match="differ only in case"):
+        importer.run(_import_args(_fake_backup(tmp_path / "b", code=code), tmp_path / "p", execute=False), None)
+
+
+def test_import_skips_dot_entries_and_symlinks(tmp_path, capsys):
+    from lambdatools import importer
+    link = zipfile.ZipInfo("link")
+    link.external_attr = (stat.S_IFLNK | 0o777) << 16
+    code = {**PY_CODE, "foo/..": "x", link: "/etc/passwd"}
+    importer.run(_import_args(_fake_backup(tmp_path / "b", code=code), tmp_path / "p"), None)
+    assert not (tmp_path / "p/link").exists()
+    assert "symlink" in _import_warnings() and "unsafe path" in _import_warnings()
+    assert not (tmp_path / ".p.import.tmp").exists()
+
+
+def test_import_refuses_leftover_temp_dir(tmp_path):
+    from lambdatools import importer
+    (tmp_path / ".p.import.tmp").mkdir()
+    with pytest.raises(ToolError, match="already exists"):
+        importer.run(_import_args(_fake_backup(tmp_path / "b", code=PY_CODE), tmp_path / "p"), None)
+
+
+def test_import_refuses_image_function(tmp_path):
+    import hashlib
+    from lambdatools import importer
+    backup_dir = _fake_backup(tmp_path / "b", code=PY_CODE)
+    manifest = json.loads((backup_dir / "manifest.json").read_text())
+    manifest["code"] = {"package_type": "Image"}
+    (backup_dir / "manifest.json").write_text(json.dumps(manifest))
+    with pytest.raises(ToolError, match="container image"):
+        importer.run(_import_args(backup_dir, tmp_path / "p"), None)
+
+
+def test_import_maps_relocated_record_paths(tmp_path, capsys):
+    from lambdatools import importer
+    code = dict(PY_CODE)
+    code["requests-2.25.0.dist-info/RECORD"] += "../../share/man/req.1,sha256=47DEQpj8HBSa-_TImW-5JCeuQeRkm5NMpJWZG3hSuFU,0\n"
+    code["share/man/req.1"] = ""
+    importer.run(_import_args(_fake_backup(tmp_path / "b", code=code), tmp_path / "p"), None)
+    assert not (tmp_path / "p/share").exists()
+
+
+def test_import_node_drops_nested_node_modules(tmp_path, capsys):
+    from lambdatools import importer
+    code = {"index.js": "", "package.json": "{}", "package-lock.json": "{}",
+            "packages/a/node_modules/x/index.js": "", "packages/a/a.js": ""}
+    backup_dir = _fake_backup(tmp_path / "b", code=code, runtime="nodejs20.x", handler="index.handler")
+    importer.run(_import_args(backup_dir, tmp_path / "p"), None)
+    assert (tmp_path / "p/packages/a/a.js").exists()
+    assert not (tmp_path / "p/packages/a/node_modules").exists()
+
+
+def test_import_handler_in_package_init(tmp_path, capsys):
+    from lambdatools import importer
+    code = {"app/__init__.py": "def handler(e, c): pass\n"}
+    assert importer.run(_import_args(_fake_backup(tmp_path / "b", code=code, handler="app.handler"),
+                                     tmp_path / "p"), None) == 0
+
+
+def test_import_handler_from_layer_warns(tmp_path, capsys):
+    from lambdatools import importer
+    code = {"handler.py": ""}
+    backup_dir = _fake_backup(tmp_path / "b", code=code, layers=["arn:aws:lambda:us-east-1:1:layer:dd:1"],
+                              handler="datadog_lambda.handler.handler")
+    assert importer.run(_import_args(backup_dir, tmp_path / "p"), None) == 0
+    assert "probably in a layer" in _import_warnings()
+
+
+@pytest.mark.parametrize("handler", ["index.handlers.main", "/opt/nodejs/node_modules/dd/handler.handler"])
+def test_import_node_handler_forms(tmp_path, capsys, handler):
+    from lambdatools import importer
+    code = {"index.js": "", "package.json": "{}", "package-lock.json": "{}"}
+    backup_dir = _fake_backup(tmp_path / "b", code=code, runtime="nodejs20.x", handler=handler)
+    assert importer.run(_import_args(backup_dir, tmp_path / "p"), None) == 0
+
+
+def test_import_unhashed_record_row_does_not_claim_user_file(tmp_path, capsys):
+    from lambdatools import importer
+    code = dict(PY_CODE, **{"utils.py": "mine\n"})
+    code["requests-2.25.0.dist-info/RECORD"] += "utils.py,,\n"
+    importer.run(_import_args(_fake_backup(tmp_path / "b", code=code), tmp_path / "p"), None)
+    assert (tmp_path / "p/utils.py").read_text() == "mine\n"
