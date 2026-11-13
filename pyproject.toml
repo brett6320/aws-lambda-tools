@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=84.2.1"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -9,16 +9,16 @@ description = "Back up, scan, remediate, and package AWS Lambda functions"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "boto3>=1.34",
-    "botocore>=1.34",
-    "packaging>=23.0",
-    "truststore>=0.10",
+    "boto3>=1.43.127",
+    "botocore>=1.43.127",
+    "packaging>=26.3",
+    "truststore>=0.10.5",
 ]
 
 [project.optional-dependencies]
 test = [
-    "moto>=5.0",
-    "pytest>=8.0",
+    "moto>=5.2.5",
+    "pytest>=9.2.0",
 ]
 
 [project.scripts]
