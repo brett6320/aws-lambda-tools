@@ -86,6 +86,7 @@ Settings resolve in this order: **CLI flag > environment variable > `lambda-tool
 | Key | Used by | Meaning |
 |---|---|---|
 | `name`, `runtime`, `version` | package (required) | Artifact name, Lambda runtime (`python3.x` / `nodejsNN.x`), current released version |
+| `versioning` | package | `semver` (default): `X.Y.Z`, raised with `--bump`. `date`: the build date `YYYY.MM.DD` (UTC, zero-padded), with `.1`, `.2`, … for further builds the same day. See [Versions](#versions) |
 | `architecture` | package, remediate | `x86_64` (default) or `arm64`; selects Linux wheels / npm `--cpu` |
 | `function_name` | package | Used to print the deploy command |
 | `requirements` | package, remediate | Python requirements file (default `requirements.txt`) |
@@ -251,7 +252,7 @@ Every proposed change is verified before it is written. Written files are backed
 ### package
 
 ```bash
-lambda-tools package [PATH] [--bump patch|minor|major | --set-version X.Y.Z] [--execute]
+lambda-tools package [PATH] [--bump patch|minor|major | --set-version VERSION] [--execute]
     [--runtime R] [--arch A] [--out DIR] [--fail-on LEVEL]
     [--allow-vulnerable] [--allow-gaps] [--allow-scripts]
 ```
@@ -273,6 +274,15 @@ The new changelog section contains:
 - **Security:** upgrades, resolved advisories, and known or allowed findings.
 - **Dependencies:** added, removed, or changed versions compared with the previous release.
 - **Build:** the artifact and its sha256.
+
+#### Versions
+
+Only `package --execute` changes the version. A dry-run shows the next version, `remediate` adds its upgrades to `[Unreleased]` in the changelog, and `import` starts a project at `0.0.0`.
+
+- **`"versioning": "semver"`** (the default): each build raises the patch number. Use `--bump minor|major` to raise another part, or `--set-version X.Y.Z` to set one.
+- **`"versioning": "date"`**: each build is versioned with its UTC build date, such as `2026.11.13`. Further builds the same day get `2026.11.13.1`, `2026.11.13.2`, and so on. `--bump` is refused. `--set-version YYYY.MM.DD[.N]` picks a specific date, which must be later than the current version. Switching an existing project from `X.Y.Z` to dates works, because dates sort after it.
+
+If a project's version looks like a date (for example `2026.11.13`) but `versioning` isn't set to `date`, `package` stops rather than raising it to a fake date such as `2026.11.14`. Add `"versioning": "date"`, or pass `--bump` to treat it as `X.Y.Z`.
 
 Commit `.lambda-tools/release-state.json`. It is the baseline for the next release's dependency and security diff, so cleaning `dist/` doesn't lose history.
 
