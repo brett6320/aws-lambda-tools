@@ -720,3 +720,45 @@ def test_backup_with_explicit_region_differing_from_config(tmp_path, lambda_env,
     args.project = tmp_path / "proj"
     backup.run(args, lambda *_: lambda_env)  # used to raise ToolError: region mismatch
     assert json.loads(capsys.readouterr().out)["written"] is False
+
+
+def _remediate_unmanaged_setup(tmp_path, monkeypatch):
+    from lambdatools.common.inventory import Inventory
+
+    def fake_resolve(files, main, runtime, arch):
+        inv = Inventory()
+        inv.add("PyPI", "idna", "3.15", "pip")
+        return inv
+
+    monkeypatch.setattr(remediate, "resolve_python", fake_resolve)
+    monkeypatch.setattr(urllib.request, "urlopen", FakeOsv(
+        affected={("PyPI", "requests", "2.25.0"): ["GHSA-R"]},
+        vulns={"GHSA-R": vuln("GHSA-R", "PyPI", "requests", fixed="2.31.0", severity="MODERATE")}))
+    (tmp_path / "requirements.txt").write_text("idna==3.15\n")
+
+
+def test_remediate_reports_vendored_packages_it_cannot_manage(tmp_path, monkeypatch, capsys):
+    # regression: scan failed on a vendored package while remediate said "No changes to make" and exited 0
+    from lambdatools.common.log import WARNINGS
+    _remediate_unmanaged_setup(tmp_path, monkeypatch)
+    (tmp_path / "requests-2.25.0.dist-info").mkdir()
+    (tmp_path / "requests-2.25.0.dist-info" / "METADATA").write_text("Name: requests\nVersion: 2.25.0\n")
+    args = argparse.Namespace(path=tmp_path, fail_on=None, execute=True)
+    assert remediate.run(args, None) == 1
+    assert "1 outside managed files" in capsys.readouterr().out
+    assert any("requests 2.25.0 in requests-2.25.0.dist-info/METADATA (GHSA-R)" in m
+               for m in WARNINGS._items["remediate"])
+    assert (tmp_path / "requirements.txt").read_text() == "idna==3.15\n"
+
+
+def test_remediate_reports_requirement_files_not_included(tmp_path, monkeypatch, capsys):
+    _remediate_unmanaged_setup(tmp_path, monkeypatch)
+    (tmp_path / "requirements-dev.txt").write_text("requests==2.25.0\n")
+    assert remediate.run(argparse.Namespace(path=tmp_path, fail_on=None, execute=False), None) == 1
+
+
+def test_remediate_included_requirement_files_are_managed(tmp_path, monkeypatch, capsys):
+    _remediate_unmanaged_setup(tmp_path, monkeypatch)
+    (tmp_path / "requirements.txt").write_text("idna==3.15\n-r requirements-extra.txt\n")
+    (tmp_path / "requirements-extra.txt").write_text("six==1.16.0\n")
+    assert remediate.run(argparse.Namespace(path=tmp_path, fail_on=None, execute=False), None) == 0
