@@ -785,3 +785,76 @@ def test_remediate_included_requirement_files_are_managed(tmp_path, monkeypatch,
     (tmp_path / "requirements.txt").write_text("idna==3.15\n-r requirements-extra.txt\n")
     (tmp_path / "requirements-extra.txt").write_text("six==1.16.0\n")
     assert remediate.run(argparse.Namespace(path=tmp_path, fail_on=None, execute=False), None) == 0
+
+
+class FakePyPI:
+    """urlopen stand-in for https://pypi.org/pypi/<name>/json."""
+
+    def __init__(self, releases):
+        self.releases = releases  # name -> {version: [filenames]}, or yanked as ("file", True)
+
+    def __call__(self, req, timeout=None):
+        name = req.full_url.split("/pypi/")[1].split("/")[0]
+        if name not in self.releases:
+            raise urllib.error.HTTPError(req.full_url, 404, "Not Found", {}, None)
+        files = {v: [{"filename": f, "yanked": False} if isinstance(f, str) else {"filename": f[0], "yanked": f[1]}
+                     for f in fs] for v, fs in self.releases[name].items()}
+        return io.BytesIO(json.dumps({"releases": files}).encode())
+
+
+def test_latest_stable_skips_prereleases_and_yanked(monkeypatch):
+    from lambdatools.common import pypi
+    monkeypatch.setattr(urllib.request, "urlopen", FakePyPI({"lib": {
+        "1.0.0": ["lib-1.0.0-py3-none-any.whl"], "1.1.0": [("lib-1.1.0-py3-none-any.whl", True)],
+        "2.0.0rc1": ["lib-2.0.0rc1-py3-none-any.whl"], "1.0.1": ["lib-1.0.1-py3-none-any.whl"]}}))
+    assert pypi.latest_stable("lib")[0] == "1.0.1"
+    assert pypi.latest_stable("private-thing") is None
+
+
+@pytest.mark.parametrize("filename,arch,ok", [
+    ("x-1-py3-none-any.whl", "arm64", True),
+    ("x-1-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", "x86_64", True),
+    ("x-1-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", "arm64", False),
+    ("x-1-cp38-abi3-manylinux2014_aarch64.whl", "arm64", True),
+    ("x-1-cp313-cp313-manylinux2014_x86_64.whl", "x86_64", False),
+    ("x-1-cp312-cp312-macosx_11_0_arm64.whl", "arm64", False),
+    ("x-1.tar.gz", "x86_64", False),
+])
+def test_has_compatible_wheel(filename, arch, ok):
+    from lambdatools.common import pypi
+    assert pypi.has_compatible_wheel([{"filename": filename}], "python3.12", arch) is ok
+
+
+def test_pinned_names_follows_includes(tmp_path):
+    (tmp_path / "requirements.txt").write_text("requests==2.31.0\nurllib3>=2\nsix\nidna==3.*\n-r more.txt\n")
+    (tmp_path / "more.txt").write_text("Certifi===2024.1.1  # pinned\n")
+    assert package.pinned_names(tmp_path, "requirements.txt") == {"requests", "certifi"}
+
+
+def test_check_latest_stable_warns_on_stale_unpinned(monkeypatch):
+    from lambdatools.common.log import WARNINGS
+    monkeypatch.setattr(urllib.request, "urlopen", FakePyPI({
+        "requests": {"2.33.0": ["requests-2.33.0-py3-none-any.whl"]},
+        "native": {"3.0.0": ["native-3.0.0-cp312-cp312-manylinux2014_x86_64.whl"]},
+        "urllib3": {"2.8.0": ["urllib3-2.8.0-py3-none-any.whl"]},
+        "pinned": {"9.0.0": ["pinned-9.0.0-py3-none-any.whl"]}}))
+    installed = [{"metadata": {"name": n, "version": v}} for n, v in
+                 [("requests", "2.32.0"), ("native", "2.0.0"), ("urllib3", "2.8.0"), ("pinned", "1.0.0"), ("private", "1.0")]]
+    stale = package.check_latest_stable(installed, {"pinned"}, "python3.12", "arm64")
+    assert stale == ["requests 2.32.0 (latest stable 2.33.0: held back by a version constraint (its own specifier or another package's))",
+                     "native 2.0.0 (latest stable 3.0.0: 3.0.0 has no wheel for python3.12 on arm64)"]
+    assert any("could not check" in m and "private" in m for m in WARNINGS._items["package"])
+
+
+def test_install_python_forces_stable_releases(tmp_path, monkeypatch):
+    calls = {}
+
+    def fake_run(cmd, cwd=None, timeout=1800, capture=False, env=None):
+        calls["env"] = env
+        Path(cmd[cmd.index("--report") + 1]).write_text(json.dumps({"install": []}))
+        return ""
+
+    monkeypatch.setattr(package.proc, "run", fake_run)
+    (tmp_path / "requirements.txt").write_text("requests\n")
+    assert package.install_python(tmp_path / "s", tmp_path / "requirements.txt", "python3.12", "x86_64") == []
+    assert calls["env"] == {"PIP_PRE": "false"}

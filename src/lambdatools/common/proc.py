@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -9,12 +10,13 @@ from pathlib import Path
 from lambdatools.common.log import ToolError, log
 
 
-def run(cmd: list[str], cwd: Path | None = None, timeout: int = 1800, capture: bool = False) -> str:
+def run(cmd: list[str], cwd: Path | None = None, timeout: int = 1800, capture: bool = False,
+        env: dict[str, str] | None = None) -> str:
     """Run cmd; its stdout goes to our stderr unless captured. Raise on failure."""
     log.info("Running: %s", " ".join(cmd))
     try:
         result = subprocess.run(
-            cmd, cwd=cwd, timeout=timeout, text=True,
+            cmd, cwd=cwd, timeout=timeout, text=True, env={**os.environ, **env} if env else None,
             stdout=subprocess.PIPE if capture else sys.stderr,
             stderr=sys.stderr,
         )
