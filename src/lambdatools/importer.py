@@ -30,6 +30,7 @@ from pathlib import Path
 from packaging.requirements import InvalidRequirement, Requirement
 from packaging.utils import canonicalize_name
 
+from lambdatools import smoke
 from lambdatools.common import backupdir, changelog, config
 from lambdatools.common.inventory import ZipTree
 from lambdatools.common.log import EXIT_OK, WARNINGS, ToolError, log, mode_prefix
@@ -441,6 +442,15 @@ def run(args: argparse.Namespace, sess_factory) -> int:
     if conf.get("Layers"):
         WARNINGS.add("import", f"{len(conf['Layers'])} layer(s) are not part of the project (layers.json in the backup); "
                                "their dependencies are not in requirements.txt")
+    if runtime.startswith("python"):
+        test_files = smoke.scaffold(conf, backup.manifest, smoke.sample_events(backup))
+        clash = sorted(p for p in test_files if p in files)
+        if clash:
+            WARNINGS.add("import", f"the zip already has {', '.join(clash)}; smoke tests not generated "
+                                   "(run `lambda-tools test --init` after moving them)")
+        else:
+            files.update(test_files)
+            modes.update({p: 0o644 for p in test_files})
     check_collisions(sorted(files))
 
     prefix = mode_prefix(args.execute)
@@ -457,6 +467,6 @@ def run(args: argparse.Namespace, sess_factory) -> int:
         "project": str(dest), "name": name, "function_name": function_name, "written": bool(args.execute),
         "files": sorted(files),
         "pinned": [f"{n}=={v}" for n, v in project.pins], "dependency_files_left_out": project.dropped,
-        "next": [f"lambda-tools scan {dest}", f"lambda-tools remediate {dest}", f"lambda-tools package {dest}"],
+        "next": [f"lambda-tools test {dest}", f"lambda-tools scan {dest}", f"lambda-tools remediate {dest}", f"lambda-tools package {dest}"],
     }, indent=2) + "\n")
     return EXIT_OK

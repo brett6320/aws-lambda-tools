@@ -424,7 +424,8 @@ def test_import_python_backup(tmp_path, capsys):
     dest = tmp_path / "proj"
     assert importer.run(_import_args(backup_dir, dest), None) == 0
     files = sorted(str(p.relative_to(dest)) for p in dest.rglob("*") if p.is_file())
-    assert files == ["CHANGELOG.md", "bin/run.sh", "handler.py", "lambda-tools.json", "lib/util.py", "requirements.txt"]
+    assert files == ["CHANGELOG.md", "bin/run.sh", "handler.py", "lambda-tools.json", "lib/util.py", "requirements.txt",
+                     "tests/events/generic.json", "tests/smoke_config.json", "tests/test_smoke.py"]
     reqs = (dest / "requirements.txt").read_text()
     assert "requests==2.25.0\nsix==1.16.0\n" in reqs
     cfg = json.loads((dest / "lambda-tools.json").read_text())
@@ -971,3 +972,395 @@ def test_package_artifact_uses_renamed_project(tmp_path, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert (tmp_path / "p" / "dist" / "orders-0.0.1.zip").exists()
     assert "--function-name orders-api " in out
+
+
+def _write_backup_json(backup_dir, name, data):
+    """Add a file to a fake backup and re-sign the manifest."""
+    import hashlib
+    (backup_dir / name).write_text(json.dumps(data))
+    manifest = json.loads((backup_dir / "manifest.json").read_text())
+    manifest["files"][name] = hashlib.sha256((backup_dir / name).read_bytes()).hexdigest()
+    (backup_dir / "manifest.json").write_text(json.dumps(manifest))
+
+
+def test_sample_events_follow_triggers(tmp_path):
+    from lambdatools import smoke
+    from lambdatools.common import backupdir
+    b = _fake_backup(tmp_path / "b", code=PY_CODE)
+    _write_backup_json(b, "policies.json", {"$LATEST": {"Policy": {"Statement": [
+        {"Principal": {"Service": "events.amazonaws.com"},
+         "Condition": {"ArnLike": {"AWS:SourceArn": "arn:aws:events:us-east-1:123456789012:rule/nightly"}}},
+        {"Principal": {"Service": "s3.amazonaws.com"},
+         "Condition": {"ArnLike": {"AWS:SourceArn": "arn:aws:s3:::uploads"}}},
+        {"Principal": {"Service": "iot.amazonaws.com"}}]}}})
+    _write_backup_json(b, "event-source-mappings.json",
+                       [{"EventSourceArn": "arn:aws:sqs:us-east-1:123456789012:jobs"}])
+    events = smoke.sample_events(backupdir.load(b))
+    assert sorted(events) == ["eventbridge.json", "s3.json", "sqs.json"]
+    assert events["eventbridge.json"]["resources"] == ["arn:aws:events:us-east-1:123456789012:rule/nightly"]
+    assert events["s3.json"]["Records"][0]["s3"]["bucket"]["name"] == "uploads"
+    assert events["sqs.json"]["Records"][0]["eventSourceARN"].endswith(":jobs")
+    assert "no sample event for trigger iot.amazonaws.com; add one in tests/events/" in _import_warnings().split(" | ")
+
+
+def test_smoke_scaffold_never_writes_env_values():
+    from lambdatools import smoke
+    conf = {"Handler": "app.handler", "FunctionName": "fn",
+            "Environment": {"Variables": {"API_TOKEN": "s3cr3t-value", "MODE": "prod"}}}
+    files = smoke.scaffold(conf, {"region": "eu-west-1", "account": "111111111111"}, {"generic.json": {}})
+    cfg = json.loads(files["tests/smoke_config.json"])
+    assert cfg["environment"] == {"API_TOKEN": "smoke-test", "MODE": "smoke-test"}
+    assert b"s3cr3t" not in b"".join(files.values())
+
+
+def _smoke_project(root, handler_body):
+    from lambdatools import smoke
+    root.mkdir()
+    (root / "app.py").write_text(handler_body)
+    files = smoke.scaffold({"Handler": "app.handler", "FunctionName": "fn", "Environment": {"Variables": {"MODE": "x"}}},
+                           {"region": "us-east-1", "account": "123456789012"},
+                           {"ok.json": {"name": "a"}, "bad.json": {}})
+    for rel, data in files.items():
+        (root / rel).parent.mkdir(parents=True, exist_ok=True)
+        (root / rel).write_bytes(data)
+
+
+def _run_generated(root, update=False, record_new=True, environ=None):
+    """Runs the generated test the way `lambda-tools test` does (bootstrap, environment, flags), minus the OS sandbox."""
+    import subprocess
+    import sys
+    from lambdatools import smoke
+    with pytest.MonkeyPatch.context() as mp:
+        for key, value in (environ or {}).items():
+            mp.setenv(key, value)
+        env = smoke.test_env()
+    if update:
+        env["LAMBDA_TOOLS_UPDATE_BASELINE"] = "1"
+    if record_new:
+        env["LAMBDA_TOOLS_RECORD_NEW"] = "1"
+    results = root.parent / "results.jsonl"
+    results.unlink(missing_ok=True)
+    env["LAMBDA_TOOLS_RESULTS"] = str(results)
+    proc = subprocess.run(smoke.test_command(sys.executable, None, root), cwd=root, env=env,
+                          capture_output=True, text=True, timeout=300)
+    baseline = root / "tests" / "smoke_baseline.json"
+    had = json.loads(baseline.read_text()) if baseline.exists() else {}
+    events = {p.name for p in (root / "tests" / "events").glob("*.json")}
+    now = smoke.merge_results(had, smoke.read_results(results), events, update)
+    if now != had:
+        baseline.write_text(json.dumps(now, indent=2, sort_keys=True) + "\n")
+    return proc
+
+
+HANDLER_V1 = """import os
+import boto3
+import urllib.request
+
+def handler(event, context):
+    assert os.environ["MODE"] == "smoke-test" and context.function_name == "fn"
+    boto3.client("s3").create_bucket(Bucket="smoke")   # answered by moto
+    if not event:
+        urllib.request.urlopen("https://example.com")  # network is blocked
+    return {"hello": event["name"]}
+"""
+
+
+def test_generated_smoke_test_records_then_compares(tmp_path):
+    root = tmp_path / "proj"
+    _smoke_project(root, HANDLER_V1)
+    first = _run_generated(root)
+    assert first.returncode == 0, first.stdout + first.stderr
+    baseline = json.loads((root / "tests" / "smoke_baseline.json").read_text())
+    assert baseline == {"ok.json": "ok", "bad.json": "urllib.error.URLError"}
+    assert _run_generated(root).returncode == 0
+    # a regression: the handler now fails on an event that used to work
+    (root / "app.py").write_text(HANDLER_V1.replace('event["name"]', 'event["missing"]'))
+    broken = _run_generated(root)
+    assert broken.returncode == 1 and "outcome changed from 'ok' to 'builtins.KeyError'" in broken.stdout
+    assert _run_generated(root, update=True).returncode == 0
+    assert json.loads((root / "tests" / "smoke_baseline.json").read_text())["ok.json"] == "builtins.KeyError"
+
+
+def test_generated_smoke_test_needs_a_recorded_outcome_after_requirements_change(tmp_path):
+    root = tmp_path / "proj"
+    _smoke_project(root, HANDLER_V1)
+    (root / "tests" / "events" / "bad.json").unlink()
+    result = _run_generated(root, record_new=False)  # what `run` does when the requirements differ
+    assert result.returncode == 1 and "has no baseline outcome" in result.stdout
+    assert not (root / "tests" / "smoke_baseline.json").exists()
+
+
+def test_generated_smoke_test_is_skipped_by_a_plain_pytest_run(tmp_path):
+    import subprocess
+    import sys
+    root = tmp_path / "proj"
+    _smoke_project(root, HANDLER_V1)
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("AWS_", "LAMBDA_TOOLS_"))}
+    result = subprocess.run([sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "tests/test_smoke.py"],
+                            cwd=root, env=env, capture_output=True, text=True, timeout=300)
+    assert result.returncode == 5 and "skipped" in result.stdout  # 5: nothing ran
+    assert not (root / "tests" / "smoke_baseline.json").exists()
+
+
+def test_generated_smoke_test_handles_slash_handlers_and_ignores_project_pytest_config(tmp_path):
+    root = tmp_path / "proj"
+    _smoke_project(root, HANDLER_V1)
+    (root / "src").mkdir()
+    (root / "app.py").rename(root / "src" / "app.py")
+    cfg = json.loads((root / "tests" / "smoke_config.json").read_text())
+    (root / "tests" / "smoke_config.json").write_text(json.dumps({**cfg, "handler": "src/app.handler"}))
+    (root / "pytest.ini").write_text("[pytest]\naddopts = -n auto --cov\n")
+    (root / "tests" / "conftest.py").write_text("import not_installed_anywhere\n")
+    result = _run_generated(root)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_smoke_env_drops_developer_environment(monkeypatch):
+    from lambdatools import smoke
+    monkeypatch.setenv("AWS_PROFILE", "prod")
+    monkeypatch.setenv("AWS_ENDPOINT_URL", "https://example.com")
+    monkeypatch.setenv("GITHUB_TOKEN", "ghp_x")
+    monkeypatch.setenv("PYTEST_ADDOPTS", "-x")
+    env = smoke.test_env()
+    assert not {"AWS_PROFILE", "AWS_ENDPOINT_URL", "GITHUB_TOKEN", "PYTEST_ADDOPTS"} & set(env)
+    assert env["AWS_CONFIG_FILE"] == env["AWS_SHARED_CREDENTIALS_FILE"] == os.devnull
+    assert env["AWS_ACCESS_KEY_ID"] == "testing" and env["AWS_EC2_METADATA_DISABLED"] == "true"
+
+
+def test_smoke_test_deps_pin_to_recorded_versions_unless_project_names_them():
+    from lambdatools import smoke
+    pins = {"boto3": "1.35.0", "botocore": "1.35.0", "moto": "5.0.1", "pytest": "8.3.0"}
+    assert smoke.test_deps([], pins) == ["boto3==1.35.0", "botocore==1.35.0", "moto==5.0.1", "pytest==8.3.0"]
+    assert smoke.test_deps(["boto3==1.34.0\nrequests\n"], pins) == ["moto==5.0.1", "pytest==8.3.0"]
+    assert smoke.test_deps([], {}) == ["boto3", "moto>=5", "pytest>=8"]
+
+
+# Each vector a handler might use to reach the network or another process; all must be refused before
+# the operating system sees them. The listener on 127.0.0.1 proves nothing was connected.
+NETWORK_PROBES = """import asyncio, ctypes, multiprocessing, os, socket, subprocess, sys, urllib.request
+from socket import getaddrinfo as early_getaddrinfo
+import pytest
+PORT = int(os.environ["PROBE_PORT"])
+
+def _udp():
+    socket.socket(socket.AF_INET, socket.SOCK_DGRAM).sendto(b"x", ("127.0.0.1", PORT))
+
+def _unix():
+    socket.socket(socket.AF_UNIX).connect("/var/run/docker.sock")
+
+async def _aio():
+    await asyncio.open_connection("127.0.0.1", PORT)
+
+VECTORS = {
+    "connect": lambda: socket.socket().connect(("127.0.0.1", PORT)),
+    "connect_ex": lambda: socket.socket().connect_ex(("127.0.0.1", PORT)),
+    "create_connection": lambda: socket.create_connection(("127.0.0.1", PORT)),
+    "c_socket": lambda: __import__("_socket").socket().connect(("127.0.0.1", PORT)),
+    "early_getaddrinfo": lambda: early_getaddrinfo("example.com", 443),
+    "gethostbyname": lambda: socket.gethostbyname("example.com"),
+    "gethostbyname_ex": lambda: socket.gethostbyname_ex("example.com"),
+    "getnameinfo": lambda: socket.getnameinfo(("127.0.0.1", PORT), 0),
+    "udp_sendto": _udp,
+    "unix": _unix,
+    "urllib": lambda: urllib.request.urlopen(f"http://127.0.0.1:{PORT}", timeout=2),
+    "asyncio": lambda: asyncio.run(_aio()),
+    "subprocess": lambda: subprocess.run(["curl", f"http://127.0.0.1:{PORT}"]),
+    "os_system": lambda: os.system("curl http://127.0.0.1:%d" % PORT),
+    "os_exec": lambda: os.execv("/usr/bin/curl", ["curl"]),
+    "posix_spawn": lambda: os.posix_spawn("/usr/bin/curl", ["curl"], {}),
+    "mp_spawn": lambda: multiprocessing.get_context("spawn").Process(target=print).start(),
+    "mp_forkserver": lambda: multiprocessing.get_context("forkserver").Process(target=print).start(),
+    "subinterpreter": lambda: __import__("_interpreters" if sys.version_info >= (3, 13) else "_xxsubinterpreters"),
+}
+
+@pytest.mark.parametrize("name", sorted(VECTORS))
+def test_blocked(name):
+    # ConnectionRefusedError / PermissionError (or URLError wrapping them); ImportError for subinterpreters
+    with pytest.raises((OSError, ImportError)):
+        VECTORS[name]()
+"""
+
+
+def test_smoke_bootstrap_blocks_every_network_and_process_vector(tmp_path):
+    import socket
+    import subprocess
+    import sys
+    from lambdatools import smoke
+    (tmp_path / "test_probe.py").write_text(NETWORK_PROBES)
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen()
+    listener.settimeout(0)
+    env = {**smoke.test_env(), "PROBE_PORT": str(listener.getsockname()[1])}
+    cmd = [sys.executable, "-c", smoke.BOOTSTRAP, "-q", "-p", "no:cacheprovider", "-c", os.devnull,
+           "--rootdir", str(tmp_path), "test_probe.py"]
+    result = subprocess.run(cmd, cwd=tmp_path, env=env, capture_output=True, text=True, timeout=300)
+    with pytest.raises(BlockingIOError):
+        listener.accept()  # nothing ever connected
+    listener.close()
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "19 passed" in result.stdout
+
+
+def test_generated_smoke_test_guards_itself_without_the_bootstrap(tmp_path):
+    import subprocess
+    import sys
+    root = tmp_path / "proj"
+    _smoke_project(root, "import socket\ndef handler(event, context):\n"
+                         "    return socket.socket().connect_ex(('192.0.2.1', 80))\n")
+    env = {**{k: v for k, v in os.environ.items() if not k.startswith("AWS_")},
+           "LAMBDA_TOOLS_SMOKE": "1", "LAMBDA_TOOLS_RECORD_NEW": "1",
+           "LAMBDA_TOOLS_RESULTS": str(tmp_path / "results.jsonl")}
+    result = subprocess.run([sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "tests/test_smoke.py"],
+                            cwd=root, env=env, capture_output=True, text=True, timeout=300)
+    assert result.returncode == 0, result.stdout + result.stderr
+    from lambdatools import smoke
+    assert set(smoke.read_results(tmp_path / "results.jsonl").values()) == {"builtins.ConnectionRefusedError"}
+
+
+# Runs with no audit hook at all, as C extensions or ctypes would: only the OS sandbox stands in the way
+OS_PROBE = """import json, os, socket, subprocess, sys
+port, sock_path, root = int(sys.argv[1]), sys.argv[2], sys.argv[3]
+def attempt(fn):
+    try:
+        fn()
+        return "allowed"
+    except Exception as e:
+        return type(e).__name__
+def write(path):
+    with open(path, "w") as f:
+        f.write("x")
+print(json.dumps({
+    "tcp": attempt(lambda: socket.create_connection(("127.0.0.1", port), timeout=5)),
+    "dns": attempt(lambda: socket.getaddrinfo("example.com", 443)),
+    "unix": attempt(lambda: socket.socket(socket.AF_UNIX).connect(sock_path)),
+    "exec": attempt(lambda: subprocess.run(["/bin/echo"], check=True, capture_output=True)),
+    "write_project": attempt(lambda: write(os.path.join(root, "planted.py"))),
+    "write_home": attempt(lambda: write(os.path.expanduser("~/.lambda-tools-sandbox-probe"))),
+    "write_tests": attempt(lambda: write(os.path.join(root, "tests", "conftest.py"))),
+    "write_tmp": attempt(lambda: write(os.path.join(os.environ["TMPDIR"], "ok.txt"))),
+}))
+"""
+
+
+def test_smoke_os_sandbox_blocks_network_below_python(tmp_path):
+    """The OS layer: code that skips the audit hook can't connect, resolve names, start programs, reach
+    local Unix sockets, or plant files outside tests/."""
+    import socket
+    import subprocess
+    import sys
+    from pathlib import Path
+    from lambdatools import smoke
+    root = tmp_path / "proj"
+    (root / "tests").mkdir(parents=True)
+    scratch = tmp_path / "tmp"
+    scratch.mkdir()
+    prefix = smoke.isolation_prefix(Path(sys.executable), root, scratch)
+    if prefix is None:
+        pytest.skip("no OS sandbox on this machine")
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen()
+    listener.settimeout(0)
+    import tempfile
+    # AF_UNIX paths are short; on Linux, also outside /tmp, /run and $HOME, which the old sandbox hid
+    sock_path = os.path.join(tempfile.mkdtemp(dir="/var/tmp" if sys.platform.startswith("linux") else "/tmp"),
+                             "s.sock")
+    unix = socket.socket(socket.AF_UNIX)
+    unix.bind(sock_path)
+    unix.listen()
+    unix.settimeout(0)
+    result = subprocess.run([*prefix, sys.executable, "-c", OS_PROBE, str(listener.getsockname()[1]), sock_path,
+                             str(root)], capture_output=True, text=True, timeout=60, cwd=root,
+                            env={**os.environ, "TMPDIR": str(scratch)})
+    for sock in (listener, unix):
+        with pytest.raises(BlockingIOError):
+            sock.accept()  # nothing ever connected
+        sock.close()
+    assert result.returncode == 0, result.stderr
+    outcome = json.loads(result.stdout)
+    assert outcome.pop("write_tmp") == "allowed"  # the per-run temp directory, where results go
+    if sys.platform.startswith("linux"):
+        outcome.pop("exec")  # bwrap can't refuse exec; children stay in the sandbox
+    assert "allowed" not in outcome.values(), outcome
+    assert not (root / "tests" / "conftest.py").exists()
+    assert not (root / "planted.py").exists()
+    assert not (Path.home() / ".lambda-tools-sandbox-probe").exists()
+
+
+def test_test_command_fails_closed_without_os_sandbox(tmp_path, monkeypatch):
+    import sys
+    from pathlib import Path
+    from lambdatools import smoke
+    (tmp_path / "lambda-tools.json").write_text(json.dumps({"name": "x", "runtime": "python3.12", "version": "1.0.0"}))
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_smoke.py").write_text("")
+    monkeypatch.setattr(smoke, "find_python", lambda runtime, explicit: (sys.executable, "3.12"))
+    monkeypatch.setattr(smoke, "ensure_env", lambda *a, **k: Path(sys.executable))
+    monkeypatch.setattr(smoke, "isolation_prefix", lambda *a: None)
+    args = argparse.Namespace(path=tmp_path, init=False, python=None, update_baseline=False, backup=None,
+                              execute=False, allow_unisolated=False)
+    with pytest.raises(ToolError, match="--allow-unisolated"):
+        smoke.run(args, None)
+
+
+def test_installed_versions_reads_metadata_without_running_the_venv(tmp_path):
+    from lambdatools import smoke
+    site = tmp_path / "venv" / "lib" / "python3.12" / "site-packages"
+    for name, version in (("moto", "5.0.1"), ("boto3", "1.35.0"), ("other", "1.0")):
+        d = site / f"{name}-{version}.dist-info"
+        d.mkdir(parents=True)
+        (d / "METADATA").write_text(f"Name: {name}\nVersion: {version}\n")
+    (site / "zz.pth").write_text("import sys; sys.exit('a .pth file ran')\n")
+    python = tmp_path / "venv" / "bin" / "python"  # doesn't exist: nothing is executed
+    assert smoke.installed_versions(python) == {"boto3": "1.35.0", "moto": "5.0.1"}
+
+
+def test_generated_smoke_test_fails_when_handler_missing(tmp_path):
+    root = tmp_path / "proj"
+    _smoke_project(root, "def other(event, context):\n    return 1\n")
+    result = _run_generated(root)
+    assert result.returncode == 1 and "test_handler_imports" in result.stdout
+
+
+def test_import_writes_smoke_tests(tmp_path, capsys):
+    from lambdatools import importer
+    importer.run(_import_args(_fake_backup(tmp_path / "b", code=PY_CODE), tmp_path / "p"), None)
+    cfg = json.loads((tmp_path / "p" / "tests" / "smoke_config.json").read_text())
+    assert cfg["handler"] == "handler.handler" and cfg["function_name"] == "orders-api"
+    assert (tmp_path / "p" / "tests" / "events" / "generic.json").exists()
+    assert json.loads(capsys.readouterr().out)["next"][0].startswith("lambda-tools test ")
+
+
+def test_find_python_checks_version(tmp_path):
+    import sys
+    from lambdatools import smoke
+    here = "%d.%d" % sys.version_info[:2]
+    assert smoke.find_python(f"python{here}", sys.executable)[1] == here
+    with pytest.raises(ToolError, match="but the function runs on python3.9"):
+        smoke.find_python("python3.9", sys.executable)
+
+
+def test_test_command_refuses_node_and_missing_tests(tmp_path):
+    from lambdatools import smoke
+    (tmp_path / "lambda-tools.json").write_text(json.dumps({"name": "x", "runtime": "nodejs20.x", "version": "1.0.0"}))
+    args = argparse.Namespace(path=tmp_path, init=False, python=None, update_baseline=False, backup=None, execute=False,
+                              allow_unisolated=False)
+    with pytest.raises(ToolError, match="Python runtimes only"):
+        smoke.run(args, None)
+    (tmp_path / "lambda-tools.json").write_text(json.dumps({"name": "x", "runtime": "python3.12", "version": "1.0.0"}))
+    with pytest.raises(ToolError, match="test --init"):
+        smoke.run(args, None)
+
+
+def test_test_init_dry_run_then_execute(tmp_path):
+    from lambdatools import smoke
+    (tmp_path / "lambda-tools.json").write_text(json.dumps(
+        {"name": "x", "runtime": "python3.12", "version": "1.0.0", "handler": "app.handler"}))
+    args = argparse.Namespace(path=tmp_path, init=True, python=None, update_baseline=False, backup=None, execute=False)
+    assert smoke.run(args, None) == 0 and not (tmp_path / "tests").exists()
+    args.execute = True
+    assert smoke.run(args, None) == 0
+    assert json.loads((tmp_path / "tests" / "smoke_config.json").read_text())["handler"] == "app.handler"
+    with pytest.raises(ToolError, match="already exist"):
+        smoke.run(args, None)

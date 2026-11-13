@@ -24,6 +24,7 @@ COMMANDS = {
     "remediate": ("lambdatools.remediate", "upgrade vulnerable dependencies to fixed versions"),
     "package": ("lambdatools.package", "build a versioned deployment zip and update the changelog"),
     "import": ("lambdatools.importer", "turn a backup into a project directory for remediate and package"),
+    "test": ("lambdatools.smoke", "run a Python function's smoke tests before and after changes"),
 }
 
 
