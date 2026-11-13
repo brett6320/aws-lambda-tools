@@ -466,13 +466,36 @@ def test_import_into_empty_destination(tmp_path, capsys):
     assert (tmp_path / "proj" / "handler.py").exists()
 
 
-def test_import_keeps_existing_requirements(tmp_path, capsys):
+def test_import_pins_existing_requirements_to_deployed_versions(tmp_path, capsys):
+    # regression: an unpinned requirements.txt in the zip left the deployed pins in a side file that
+    # remediate doesn't manage, so scan failed while remediate had nothing to change
+    from lambdatools import importer
+    original = "# app deps\nrequests[socks] >= 2.0 ; python_version >= '3.8'  # http\nsix @ https://x/six.whl\n"
+    code = dict(PY_CODE, **{"requirements.txt": original})
+    importer.run(_import_args(_fake_backup(tmp_path / "b", code=code), tmp_path / "proj"), None)
+    req = (tmp_path / "proj" / "requirements.txt").read_text()
+    assert req == "# app deps\nrequests[socks]==2.25.0; python_version >= \"3.8\"  # http\nsix @ https://x/six.whl\n"
+    assert not (tmp_path / "proj" / "requirements.deployed.txt").exists()
+    warnings = _import_warnings()
+    assert "requests were not pinned" in warnings and "six is installed from a URL" in warnings
+    # remediate can now bump the pinned line
+    assert remediate.rewrite_pin(req, "requests", "2.31.0")[1] == "pinned"
+
+
+def test_import_puts_transitive_deployed_packages_in_managed_block(tmp_path, capsys):
     from lambdatools import importer
     code = dict(PY_CODE, **{"requirements.txt": "requests\n"})
-    backup_dir = _fake_backup(tmp_path / "b", code=code)
-    importer.run(_import_args(backup_dir, tmp_path / "proj"), None)
-    assert (tmp_path / "proj" / "requirements.txt").read_text() == "requests\n"
-    assert "requests==2.25.0" in (tmp_path / "proj" / "requirements.deployed.txt").read_text()
+    importer.run(_import_args(_fake_backup(tmp_path / "b", code=code), tmp_path / "proj"), None)
+    req = (tmp_path / "proj" / "requirements.txt").read_text()
+    assert req == f"requests==2.25.0\n\n{remediate.BLOCK_BEGIN}\nsix==1.16.0\n{remediate.BLOCK_END}\n"
+
+
+def test_import_warns_when_deployed_version_breaks_specifier(tmp_path, capsys):
+    from lambdatools import importer
+    code = dict(PY_CODE, **{"requirements.txt": "requests<2.0\nsix==1.0.0\n"})
+    importer.run(_import_args(_fake_backup(tmp_path / "b", code=code), tmp_path / "proj"), None)
+    assert (tmp_path / "proj" / "requirements.txt").read_text() == "requests==2.25.0\nsix==1.16.0\n"
+    assert "does not satisfy <2.0" in _import_warnings()
 
 
 def test_import_dist_info_without_record_or_top_level_keeps_files(tmp_path, capsys):
