@@ -21,7 +21,7 @@ import sys
 import tempfile
 import time
 import zipfile
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 from packaging.requirements import InvalidRequirement, Requirement
@@ -254,21 +254,45 @@ def release_sections(prev: dict, deps: dict[str, str], result: ScanResult, artif
     return sections
 
 
-def next_version(current: str, bump: str | None, set_version: str | None) -> str:
+def next_version(current: str, bump: str | None, set_version: str | None,
+                 scheme: str = "semver", today: date | None = None) -> str:
+    if scheme == "date":
+        if bump:
+            raise ToolError("--bump doesn't apply with \"versioning\": \"date\"; the version is the build date "
+                            "(use --set-version to choose one)")
+        if set_version:
+            if not versions.is_date_version(set_version):
+                raise ToolError(f"--set-version {set_version!r} must be a date YYYY.MM.DD or YYYY.MM.DD.N")
+            if versions.numeric_key(set_version) <= versions.numeric_key(current):
+                raise ToolError(f"--set-version {set_version} must be later than the current version {current}")
+            return set_version
+        try:
+            return versions.next_date_version(current, today or build_day())
+        except ValueError as e:
+            raise ToolError(f"{e}; pass --set-version to choose a later version") from None
+    if bump is None and versions.is_date_version(current):
+        raise ToolError(f"version {current} looks like a date; add \"versioning\": \"date\" to lambda-tools.json, "
+                        "or pass --bump to treat it as X.Y.Z")
     if set_version:
         if not config.SEMVER_RE.match(set_version):
             raise ToolError(f"--set-version {set_version!r} must be X.Y.Z")
-        if not versions.release_greater(set_version, current):
+        if versions.numeric_key(set_version) <= versions.numeric_key(current):
             raise ToolError(f"--set-version {set_version} must be greater than the current version {current}")
         return set_version
     return versions.bump(current, bump or "patch")
 
 
+def build_day() -> date:
+    """The build date (UTC), used for the changelog and for date versions."""
+    return datetime.now(timezone.utc).date()
+
+
 def add_arguments(p: argparse.ArgumentParser) -> None:
     p.add_argument("path", type=Path, nargs="?", default=Path.cwd(), help="project directory (default: current directory)")
     v = p.add_mutually_exclusive_group()
-    v.add_argument("--bump", choices=("patch", "minor", "major"), help="version part to increment (default: patch)")
-    v.add_argument("--set-version", help="explicit new version X.Y.Z (must be greater than the current one)")
+    v.add_argument("--bump", choices=("patch", "minor", "major"),
+                   help="version part to increment (default: patch; not used with date versioning)")
+    v.add_argument("--set-version", help="explicit new version, X.Y.Z or YYYY.MM.DD[.N] (must be greater than the current one)")
     p.add_argument("--runtime", help="override the runtime from lambda-tools.json")
     p.add_argument("--arch", choices=("x86_64", "arm64"), help="override the architecture from lambda-tools.json")
     p.add_argument("--out", type=Path, help="artifact directory (default: PATH/dist)")
@@ -295,7 +319,7 @@ def run(args: argparse.Namespace, sess_factory) -> int:
     if state.get("version") and state["version"] != current:
         raise ToolError(f"lambda-tools.json version {current} disagrees with {config.state_path(root)} "
                         f"({state['version']}); fix one of them by hand")
-    version = next_version(current, args.bump, args.set_version)
+    version = next_version(current, args.bump, args.set_version, cfg.get("versioning", "semver"))
     out_dir = (args.out or root / "dist").resolve()
     artifact_name = f"{name}-{version}.zip"
     artifact, manifest_path = out_dir / artifact_name, out_dir / f"{name}-{version}.manifest.json"
@@ -351,7 +375,7 @@ def run(args: argparse.Namespace, sess_factory) -> int:
     sha256 = hashlib.sha256(data).hexdigest()
     deps = dependency_map(result)
     sections = release_sections(state, deps, result, artifact_name, sha256)
-    today = date.today().isoformat()
+    today = build_day().isoformat()
     new_log = changelog.release(old_log, version, today, sections)
     manifest = {
         "name": name, "version": version, "built_at": utc_now_iso(), "tool_version": __version__,

@@ -858,3 +858,77 @@ def test_install_python_forces_stable_releases(tmp_path, monkeypatch):
     (tmp_path / "requirements.txt").write_text("requests\n")
     assert package.install_python(tmp_path / "s", tmp_path / "requirements.txt", "python3.12", "x86_64") == []
     assert calls["env"] == {"PIP_PRE": "false"}
+
+
+@pytest.mark.parametrize("current,expected", [
+    ("0.0.0", "2026.11.13"),            # switching from X.Y.Z (e.g. a fresh import)
+    ("2026.11.12", "2026.11.13"),
+    ("2026.11.13", "2026.11.13.1"),     # second build the same day
+    ("2026.11.13.1", "2026.11.13.2"),
+])
+def test_next_date_version(current, expected):
+    from datetime import date
+    from lambdatools.common import versions
+    assert versions.next_date_version(current, date(2026, 11, 13)) == expected
+
+
+def test_next_date_version_refuses_versions_after_today():
+    from datetime import date
+    from lambdatools.common import versions
+    with pytest.raises(ValueError, match="not earlier than today's date 2026.11.13"):
+        versions.next_date_version("2026.11.14", date(2026, 11, 13))
+
+
+def test_date_versions_are_zero_padded():
+    from datetime import date
+    from lambdatools.common import versions
+    assert versions.next_date_version("2026.03.01", date(2026, 3, 4)) == "2026.03.04"
+
+
+@pytest.mark.parametrize("kw,match", [
+    ({"bump": "patch"}, "--bump doesn't apply"),
+    ({"set_version": "2026.13.01"}, "must be a date"),
+    ({"set_version": "2026.11.12"}, "must be later"),
+])
+def test_date_versioning_rejects(kw, match):
+    from datetime import date
+    with pytest.raises(ToolError, match=match):
+        package.next_version("2026.11.12", kw.get("bump"), kw.get("set_version"), "date", date(2026, 11, 13))
+
+
+def test_date_versioning_set_version_same_day_counter():
+    from datetime import date
+    assert package.next_version("2026.11.13", None, "2026.11.13.5", "date", date(2026, 11, 13)) == "2026.11.13.5"
+
+
+def test_semver_mode_refuses_to_patch_bump_a_date():
+    with pytest.raises(ToolError, match="looks like a date"):
+        package.next_version("2026.11.13", None, None)
+    assert package.next_version("2026.11.13", "patch", None) == "2026.11.14"  # explicit --bump is honored
+    assert package.next_version("1000.10.10", None, None) == "1000.10.11"     # not a plausible date
+    assert package.next_version("1.0.0", None, "2026.11.03") == "2026.11.03"  # padded --set-version no longer crashes
+
+
+def test_config_four_part_version_needs_date_versioning():
+    from lambdatools.common import config as cfgmod
+    cfgmod.validate({"version": "2026.11.13.1", "versioning": "date"}, Path("x"))
+    with pytest.raises(ToolError, match="needs \"versioning\": \"date\""):
+        cfgmod.validate({"version": "2026.11.13.1"}, Path("x"))
+    with pytest.raises(ToolError, match="versioning"):
+        cfgmod.validate({"versioning": "calver"}, Path("x"))
+
+
+def test_package_with_date_versioning_end_to_end(tmp_path, monkeypatch, capsys):
+    from datetime import date
+    _py_project(tmp_path)
+    cfg = json.loads((tmp_path / "lambda-tools.json").read_text())
+    cfg.update(version="0.0.0", versioning="date")
+    (tmp_path / "lambda-tools.json").write_text(json.dumps(cfg))
+    monkeypatch.setattr(urllib.request, "urlopen", FakeOsv())
+    monkeypatch.setattr(package, "build_day", lambda: date(2026, 11, 3))
+    assert package.run(_package_args(tmp_path), None) == 0
+    assert package.run(_package_args(tmp_path), None) == 0
+    assert (tmp_path / "dist" / "demo-2026.11.03.zip").exists() and (tmp_path / "dist" / "demo-2026.11.03.1.zip").exists()
+    assert json.loads((tmp_path / "lambda-tools.json").read_text())["version"] == "2026.11.03.1"
+    log = (tmp_path / "CHANGELOG.md").read_text()
+    assert "## [2026.11.03.1] - 2026-11-03" in log and "## [2026.11.03] - 2026-11-03" in log

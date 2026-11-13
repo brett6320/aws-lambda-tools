@@ -24,6 +24,9 @@ SEVERITIES = ("low", "medium", "high", "critical")
 FAIL_ON_CHOICES = (*SEVERITIES, "none")
 RUNTIME_RE = re.compile(r"^(python3\.\d+|nodejs\d+\.x)$")
 SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+$")
+# X.Y.Z, or YYYY.MM.DD.N (a same-day rebuild) when versioning is "date"
+VERSION_RE = re.compile(r"^\d+\.\d+\.\d+(?:\.\d+)?$")
+VERSIONING_CHOICES = ("semver", "date")
 
 
 def _str(v: Any) -> bool:
@@ -55,7 +58,8 @@ SCHEMA: dict[str, tuple] = {
     "function_name": (_str, "a Lambda function name or ARN"),
     "runtime": (lambda v: _str(v) and RUNTIME_RE.match(v), "a Lambda runtime such as python3.12 or nodejs20.x"),
     "architecture": (lambda v: v in ("x86_64", "arm64"), "x86_64 or arm64"),
-    "version": (lambda v: _str(v) and SEMVER_RE.match(v), "a version X.Y.Z"),
+    "version": (lambda v: _str(v) and VERSION_RE.match(v), "a version X.Y.Z (or YYYY.MM.DD[.N] with date versioning)"),
+    "versioning": (lambda v: v in VERSIONING_CHOICES, f"one of {', '.join(VERSIONING_CHOICES)}"),
     "handler": (_str, "a handler string"),
     "requirements": (_str, "a path to a requirements file"),
     "exclude": (_str_list, "a list of glob patterns"),
@@ -89,6 +93,8 @@ def validate(data: Any, source: Path) -> dict:
         check, description = SCHEMA[key]
         if not check(value):
             raise ToolError(f"{source}: key {key!r} must be {description}")
+    if data.get("versioning", "semver") != "date" and str(data.get("version", "")).count(".") == 3:
+        raise ToolError(f"{source}: a four-part version needs \"versioning\": \"date\"")
     return data
 
 
