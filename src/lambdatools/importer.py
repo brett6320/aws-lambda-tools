@@ -27,11 +27,15 @@ from dataclasses import dataclass, field
 from email.parser import HeaderParser
 from pathlib import Path
 
+from packaging.requirements import InvalidRequirement, Requirement
+from packaging.utils import canonicalize_name
+
 from lambdatools.common import backupdir, changelog, config
 from lambdatools.common.inventory import ZipTree
 from lambdatools.common.log import EXIT_OK, WARNINGS, ToolError, log, mode_prefix
 from lambdatools.common.sanitize import clean, valid_package_name, valid_version
 from lambdatools.package import SECRET_EXCLUDES, excluded
+from lambdatools.remediate import set_block_pin
 
 MAX_FILE_BYTES = 250 * 1024 * 1024
 IMPORTED_VERSION = "0.0.0"
@@ -276,6 +280,70 @@ def requirements_text(pins: list[tuple[str, str]], label: str) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _pin_line(line: str, name: str, version: str) -> tuple[str, str | None]:
+    """Rewrite one requirement line for `name` as ==version, keeping extras, marker and comment.
+
+    Returns (line, status); status is None when the line isn't a requirement for `name`.
+    """
+    body, newline = line.rstrip("\r\n"), line[len(line.rstrip("\r\n")):]
+    code, hash_, comment = body.partition(" #")
+    stripped = code.strip()
+    if not stripped or stripped.startswith(("#", "-")) or stripped.endswith("\\"):
+        return line, None
+    try:
+        req = Requirement(stripped)
+    except InvalidRequirement:
+        return line, None
+    if canonicalize_name(req.name) != canonicalize_name(name):
+        return line, None
+    if req.url:
+        return line, f"{req.name} is installed from a URL; left as is"
+    status = "pinned"
+    if req.specifier and not req.specifier.contains(version, prereleases=True):
+        status = f"deployed {req.name} {version} does not satisfy {req.specifier}; pinned to the deployed version"
+    extras = f"[{','.join(sorted(req.extras))}]" if req.extras else ""
+    marker = f"; {req.marker}" if req.marker else ""
+    indent = code[: len(code) - len(code.lstrip())]
+    gap = code[len(code.rstrip()):]  # spacing before an inline comment
+    tail = f"{gap}{hash_}{comment}" if hash_ else ""
+    return f"{indent}{req.name}{extras}=={version}{marker}{tail}{newline}", status
+
+
+def pin_existing_requirements(text: str, pins: list[tuple[str, str]]) -> str:
+    """Pin the zip's own requirements.txt to the deployed versions.
+
+    Listed packages are rewritten as ==deployed (whatever specifier they had);
+    the rest of the deployed packages (transitive) go into the managed block
+    that remediate maintains, so every deployed package is pinned in one file.
+    """
+    lines = text.splitlines(keepends=True)
+    if lines and not lines[-1].endswith("\n"):
+        lines[-1] += "\n"
+    unpinned = []
+    for name, version in sorted(pins, key=lambda p: p[0].lower()):
+        found = False
+        for i, line in enumerate(lines):
+            new, status = _pin_line(line, name, version)
+            if status is None:
+                continue
+            found = True
+            if status.endswith("left as is"):
+                WARNINGS.add("import", f"requirements.txt: {status}")
+                continue
+            if status != "pinned":
+                WARNINGS.add("import", f"requirements.txt: {status}")
+            if "==" not in line.partition(" #")[0]:
+                unpinned.append(name)
+            lines[i] = new
+        if not found:
+            text_now = "".join(lines)
+            lines = set_block_pin(text_now, name, version).splitlines(keepends=True)
+    if unpinned:
+        WARNINGS.add("import", f"requirements.txt pinned to the deployed versions: {', '.join(unpinned)} were not "
+                               "pinned with ==")
+    return "".join(lines)
+
+
 def write_project(dest: Path, files: dict[str, bytes], modes: dict[str, int]) -> None:
     """Write into a new temp dir next to dest, then rename it into place."""
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -333,16 +401,14 @@ def run(args: argparse.Namespace, sess_factory) -> int:
     check_handler(handler, runtime, tree.files(), files, bool(conf.get("Layers")))
 
     if runtime.startswith("python") and project.pins:
-        text = requirements_text(project.pins, backup.label).encode()
         if "requirements.txt" not in files:
-            files["requirements.txt"] = text
-        elif "requirements.deployed.txt" not in files:
-            WARNINGS.add("import", "the zip already has requirements.txt; kept it, and wrote the deployed versions to "
-                                   "requirements.deployed.txt for reference")
-            files["requirements.deployed.txt"] = text
+            files["requirements.txt"] = requirements_text(project.pins, backup.label).encode()
         else:
-            raise ToolError("the zip already has requirements.txt and requirements.deployed.txt; import won't "
-                            "overwrite either")
+            try:
+                original = files["requirements.txt"].decode()
+            except UnicodeDecodeError:
+                raise ToolError("the zip's requirements.txt is not UTF-8; import can't pin it") from None
+            files["requirements.txt"] = pin_existing_requirements(original, project.pins).encode()
     for generated in GENERATED:
         if generated in files:
             WARNINGS.add("import", f"the zip already has {generated}; kept it instead of generating one. Check that "
