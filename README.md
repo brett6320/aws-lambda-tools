@@ -11,6 +11,7 @@ Find and fix known vulnerabilities in AWS Lambda functions the same way every ti
 |---|---|---|
 | `backup` | Captures a function's code, configuration, versions, aliases, permissions, triggers, and execution role. Environment variable values go to `pass`. | Read-only |
 | `scan` | Checks a project, a deployment zip, or a deployed function (plus its layers) against [OSV.dev](https://osv.dev). | Read-only (with `--function`) |
+| `import` | Turns a backup into a project directory: your code, a `requirements.txt` pinned to the deployed versions, `lambda-tools.json`, and a changelog. | No |
 | `remediate` | Upgrades vulnerable dependencies to fixed versions, re-resolves and re-scans to verify, and records the change in `CHANGELOG.md`. | No |
 | `package` | Builds a reproducible, versioned deployment zip for the Lambda platform, scans it, and blocks the build on findings. Updates the changelog and version. | No |
 
@@ -23,6 +24,8 @@ Every command that changes something is a **dry-run by default**. It shows what 
 ```bash
 lambda-tools backup my-function --execute         # snapshot what is deployed now
 lambda-tools scan --function my-function          # what is vulnerable in production?
+lambda-tools import backups/<account>/<region>/my-function/<id> --to ./my-function-src --execute
+                                                  # only when you have no source checkout
 lambda-tools remediate ./my-function-src          # review the proposed upgrades
 lambda-tools remediate ./my-function-src --execute
 lambda-tools package ./my-function-src            # dry-run: version, changelog diff, sha256
@@ -180,6 +183,37 @@ Container image functions exit 2 with a pointer to an image scanner.
 - If neither exists, the severity is `UNKNOWN`. UNKNOWN ranks highest, so it fails whenever anything does.
 - Advisories that are aliases of each other (GHSA / PYSEC / CVE) are merged into one finding.
 - Withdrawn advisories are skipped.
+
+### import
+
+```bash
+lambda-tools import BACKUP_DIR [--to DIR] [--execute]
+```
+
+Use this when the deployed function has no source checkout. It turns a backup's `code.zip` into a project that `scan`, `remediate`, and `package` can work on. The backup is checked against its manifest checksums first.
+
+- **Python:** packages installed at the zip root are told apart from your code by their `*.dist-info/RECORD`, or by `top_level.txt` when there is no RECORD. Their files are left out. `requirements.txt` pins every one of them, direct and transitive, to the deployed version. If the zip already has a `requirements.txt`, that file is kept and the deployed versions go to `requirements.deployed.txt`.
+- **Node.js:** every `node_modules/` directory is left out, and the zip's `package-lock.json` is kept. A zip with `package.json` but no lockfile is refused, because the deployed versions can't be reproduced. Bundled code without a `package.json` is imported with a warning.
+- Also written: `lambda-tools.json` (name, runtime, architecture, handler, account, region, version `0.0.0`) and `CHANGELOG.md`. If the zip already contains either file, the zip's copy is kept, with a warning.
+
+When import can't be sure a file belongs to a dependency, it keeps the file as project code and warns. Cases:
+
+- A dependency file that differs from its RECORD hash, which usually means it was patched after install.
+- A file inside a dependency's directory that its RECORD doesn't list.
+- Packages with no `dist-info` (for example, a "slim" build) or with only `egg-info`.
+- `top_level.txt` names such as `tests` or `config`.
+- RECORD entries without a hash.
+
+Import refuses, and writes nothing, when:
+
+- the handler is in the zip but wouldn't end up in the project, for example because it is compiled-only (a handler that lives in a layer, such as a monitoring wrapper, only gets a warning);
+- the same package is installed twice;
+- two paths would collide (including paths that differ only in case);
+- the function is a container image.
+
+Credential files (`.env*`, `.npmrc`, `.pypirc`, `*.pem`, `*.key`, and others) and environment variable values are never written. `__pycache__`, symlinks, and unsafe zip paths are skipped. Layers aren't part of the project.
+
+`--to` defaults to `./<function name>`, and that directory must not exist or must be empty. The project is written to a temp directory beside it and then renamed into place.
 
 ### remediate
 
