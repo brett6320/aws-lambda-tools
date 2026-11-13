@@ -1000,7 +1000,7 @@ def test_sample_events_follow_triggers(tmp_path):
     assert events["eventbridge.json"]["resources"] == ["arn:aws:events:us-east-1:123456789012:rule/nightly"]
     assert events["s3.json"]["Records"][0]["s3"]["bucket"]["name"] == "uploads"
     assert events["sqs.json"]["Records"][0]["eventSourceARN"].endswith(":jobs")
-    assert any("iot.amazonaws.com" in m for m in _import_warnings().split(" | "))
+    assert "no sample event for trigger iot.amazonaws.com; add one in tests/events/" in _import_warnings().split(" | ")
 
 
 def test_smoke_scaffold_never_writes_env_values():
