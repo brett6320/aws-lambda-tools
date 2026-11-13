@@ -10,7 +10,7 @@ from pathlib import Path
 
 from botocore.exceptions import ClientError
 
-from lambdatools.common import aws, config
+from lambdatools.common import aws, backupdir, config
 from lambdatools.common.fsutil import atomic_write, refuse_if_tracked_location, utc_now_iso
 from lambdatools.common.inventory import Inventory, Tree, ZipTree, build_inventory, open_path
 from lambdatools.common.log import EXIT_FINDINGS, EXIT_OK, WARNINGS, ToolError, log
@@ -123,6 +123,14 @@ def function_trees(sess, function: str, qualifier: str | None,
     return target, trees, notes, gaps
 
 
+def backup_trees(path: Path) -> tuple[str, list[Tree], list[str], list[str]]:
+    """Scan a backup's verified code.zip; layers are not in backups, so they are a gap."""
+    backup = backupdir.load(path)
+    gaps = [f"layer {layer.get('Arn')}: contents are not stored in backups; not scanned"
+            for layer in backup.configuration.get("Layers", [])]
+    return backup.label, [ZipTree(backup.code(), f"{path.name}/code.zip")], [NOTE_RUNTIME], gaps
+
+
 def render_text(result: ScanResult, out=None) -> None:
     out = out or sys.stdout
     s = summary(result)
@@ -174,6 +182,8 @@ def run(args: argparse.Namespace, sess_factory) -> int:
     client = OsvClient()
     if args.function:
         target, trees, notes, gaps = function_trees(sess_factory(), args.function, args.qualifier, cfg)
+    elif backupdir.is_backup(args.path):
+        target, trees, notes, gaps = backup_trees(args.path)
     else:
         target, trees, notes, gaps = str(args.path), [open_path(args.path)], [NOTE_RUNTIME], []
     result = scan_trees(target, trees, policy, client, include_dev=args.include_dev, notes=notes, gaps=gaps)

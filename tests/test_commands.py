@@ -327,3 +327,68 @@ def test_root_backups_dir_is_never_packaged_or_scanned(tmp_path):
     assert not package.excluded("lib/backups", package.DEFAULT_EXCLUDES)
     files = DirTree(tmp_path).files()
     assert "lib/backups/mod.py" in files and not any(f.startswith("backups/") for f in files)
+
+
+# --- backups as scan input ------------------------------------------------------
+
+def _fake_backup(root: Path, layers=(), code=None, tamper=False):
+    import hashlib
+    root.mkdir(parents=True)
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        for name, data in (code or {
+            "handler.py": "import requests\n",
+            "requests-2.25.0.dist-info/METADATA": "Name: requests\nVersion: 2.25.0\n",
+        }).items():
+            zf.writestr(name, data)
+    files = {
+        "code.zip": buf.getvalue(),
+        "function.json": json.dumps({"Configuration": {
+            "FunctionName": "orders-api", "FunctionArn": "arn:aws:lambda:us-east-1:123456789012:function:orders-api",
+            "Runtime": "python3.12", "Architectures": ["arm64"], "Handler": "handler.handler",
+            "Layers": [{"Arn": a} for a in layers]}}).encode(),
+    }
+    import hashlib
+    manifest = {"tool": "lambda-tools", "backup_id": "20261113T000000Z", "account": "123456789012", "region": "us-east-1",
+                "function_arn": "arn:aws:lambda:us-east-1:123456789012:function:orders-api",
+                "code": {"package_type": "Zip"},
+                "files": {n: hashlib.sha256(d).hexdigest() for n, d in files.items()}}
+    for n, d in files.items():
+        (root / n).write_bytes(d)
+    (root / "manifest.json").write_text(json.dumps(manifest))
+    if tamper:
+        (root / "function.json").write_text("{}")
+    return root
+
+
+def _scan_args(path, **kw):
+    base = dict(path=path, function=None, qualifier=None, project=None, fail_on=None, allow_gaps=False,
+                include_dev=False, json=True, report=None)
+    base.update(kw)
+    return argparse.Namespace(**base)
+
+
+def test_scan_backup_dir_scans_its_code_zip(tmp_path, monkeypatch, capsys):
+    from lambdatools import scan
+    backup_dir = _fake_backup(tmp_path / "b", layers=["arn:aws:lambda:us-east-1:123456789012:layer:x:1"])
+    monkeypatch.setattr(urllib.request, "urlopen", FakeOsv(
+        affected={("PyPI", "requests", "2.25.0"): ["GHSA-1"]},
+        vulns={"GHSA-1": vuln("GHSA-1", "PyPI", "requests", fixed="2.31.0", severity="HIGH")}))
+    assert scan.run(_scan_args(backup_dir), None) == 1
+    report = json.loads(capsys.readouterr().out)
+    assert [f["id"] for f in report["findings"]] == ["GHSA-1"]
+    assert any("layer" in g for g in report["coverage_gaps"])
+
+
+def test_scan_rejects_tampered_backup(tmp_path):
+    from lambdatools import scan
+    with pytest.raises(ToolError, match="checksum"):
+        scan.run(_scan_args(_fake_backup(tmp_path / "b", tamper=True)), None)
+
+
+def test_scan_dir_with_only_archives_is_a_gap(tmp_path, monkeypatch, capsys):
+    from lambdatools import scan
+    (tmp_path / "code.zip").write_bytes(b"PK\x05\x06" + b"\0" * 18)
+    monkeypatch.setattr(urllib.request, "urlopen", FakeOsv())
+    assert scan.run(_scan_args(tmp_path), None) == 1
+    assert "archives are not opened" in json.loads(capsys.readouterr().out)["coverage_gaps"][0]
