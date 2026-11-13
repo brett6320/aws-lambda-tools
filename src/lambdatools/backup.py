@@ -19,7 +19,7 @@ from typing import Any, Callable
 from botocore.exceptions import ClientError
 
 from lambdatools import __version__
-from lambdatools.common import aws, config, secretstore
+from lambdatools.common import aws, config, runtimes, secretstore
 from lambdatools.common.fsutil import data_dir, ensure_private_dir, refuse_if_tracked_location, utc_now_iso, utc_stamp
 from lambdatools.common.log import EXIT_FINDINGS, EXIT_OK, WARNINGS, ToolError, log, mode_prefix
 
@@ -264,6 +264,7 @@ def run(args: argparse.Namespace, sess_factory) -> int:
     conf = files["function.json"]["Configuration"]
     arn, name = conf["FunctionArn"], conf["FunctionName"]
     account, region = arn.split(":")[4], arn.split(":")[3]
+    runtimes.report(conf.get("Runtime"), "backup")  # container-image functions have none
 
     values: dict[str, dict] = {}
     contexts, env_errors = extract_environment(files, values)

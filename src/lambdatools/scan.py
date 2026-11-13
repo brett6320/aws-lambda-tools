@@ -10,7 +10,7 @@ from pathlib import Path
 
 from botocore.exceptions import ClientError
 
-from lambdatools.common import aws, backupdir, config
+from lambdatools.common import aws, backupdir, config, runtimes
 from lambdatools.common.fsutil import atomic_write, refuse_if_tracked_location, utc_now_iso
 from lambdatools.common.inventory import Inventory, Tree, ZipTree, build_inventory, open_path
 from lambdatools.common.log import EXIT_FINDINGS, EXIT_OK, WARNINGS, ToolError, log
@@ -30,13 +30,15 @@ class ScanResult:
     findings: list[Finding]
     policy: Policy
     notes: list[str] = field(default_factory=list)
+    runtime: runtimes.RuntimeStatus | None = None
 
     @property
     def failing(self) -> list[Finding]:
         return [f for f in self.findings if self.policy.fails(f)]
 
-    def exit_code(self, allow_gaps: bool) -> int:
-        if self.failing or (self.inventory.gaps and not allow_gaps):
+    def exit_code(self, allow_gaps: bool, allow_deprecated_runtime: bool = False) -> int:
+        deprecated = self.runtime is not None and self.runtime.level == "deprecated" and not allow_deprecated_runtime
+        if self.failing or (self.inventory.gaps and not allow_gaps) or deprecated:
             return EXIT_FINDINGS
         return EXIT_OK
 
@@ -49,6 +51,8 @@ class ScanResult:
             "findings": [f.to_dict() for f in self.findings],
             "coverage_gaps": self.inventory.gaps,
             "notes": self.notes,
+            "runtime": ({"runtime": self.runtime.runtime, "status": self.runtime.level, "message": self.runtime.message,
+                         "newest": self.runtime.newest} if self.runtime else None),
             "summary": summary(self),
         }
 
@@ -91,7 +95,7 @@ def scan_trees(target: str, trees: list[Tree], policy: Policy, client: OsvClient
 
 
 def function_trees(sess, function: str, qualifier: str | None,
-                   cfg: config.ProjectConfig | None) -> tuple[str, list[Tree], list[str], list[str]]:
+                   cfg: config.ProjectConfig | None) -> tuple[str, list[Tree], list[str], list[str], str | None]:
     """Download a function's code and layers (verified) as in-memory trees."""
     lam = aws.client(sess, "lambda")
     params = {"FunctionName": function, **({"Qualifier": qualifier} if qualifier else {})}
@@ -120,15 +124,16 @@ def function_trees(sess, function: str, qualifier: str | None,
             continue
         content = meta["Content"]
         trees.append(ZipTree(aws.download_verified(content["Location"], content["CodeSha256"], f"layer {arn}"), f"layer:{arn}"))
-    return target, trees, notes, gaps
+    return target, trees, notes, gaps, conf.get("Runtime")
 
 
-def backup_trees(path: Path) -> tuple[str, list[Tree], list[str], list[str]]:
+def backup_trees(path: Path) -> tuple[str, list[Tree], list[str], list[str], str | None]:
     """Scan a backup's verified code.zip; layers are not in backups, so they are a gap."""
     backup = backupdir.load(path)
     gaps = [f"layer {layer.get('Arn')}: contents are not stored in backups; not scanned"
             for layer in backup.configuration.get("Layers", [])]
-    return backup.label, [ZipTree(backup.code(), f"{path.name}/code.zip")], [NOTE_RUNTIME], gaps
+    return (backup.label, [ZipTree(backup.code(), f"{path.name}/code.zip")], [NOTE_RUNTIME], gaps,
+            backup.configuration.get("Runtime"))
 
 
 def render_text(result: ScanResult, out=None) -> None:
@@ -157,6 +162,9 @@ def render_text(result: ScanResult, out=None) -> None:
         out.write("  All dependency manifests found were scanned.\n")
     for n in result.notes:
         out.write(f"  NOTE  {clean(n)}\n")
+    if result.runtime:
+        label = {"ok": "OK", "warn": "WARNING", "deprecated": "DEPRECATED"}[result.runtime.level]
+        out.write(f"\nRuntime:\n  {label}  {clean(result.runtime.message)}\n")
     findings = ", ".join(f"{k.lower()}={v}" for k, v in sorted(s["findings"].items())) or "none"
     out.write(f"\nSummary: findings {findings}; ignored {s['ignored']}; failing (fail-on {result.policy.fail_on}) "
               f"{s['failing']}; coverage gaps {s['coverage_gaps']}\n")
@@ -170,6 +178,8 @@ def add_arguments(p: argparse.ArgumentParser) -> None:
     p.add_argument("--project", type=Path, help="directory holding lambda-tools.json (default: PATH, or current directory)")
     p.add_argument("--fail-on", choices=config.FAIL_ON_CHOICES, help="lowest severity that fails (default: low)")
     p.add_argument("--allow-gaps", action="store_true", help="do not fail when some dependencies could not be scanned")
+    p.add_argument("--allow-deprecated-runtime", action="store_true",
+                   help="do not fail when the function's runtime is deprecated (it is still reported)")
     p.add_argument("--include-dev", action="store_true", help="include npm devDependencies from package-lock.json")
     p.add_argument("--json", action="store_true", help="print the report as JSON")
     p.add_argument("--report", type=Path, help="also write the JSON report to this file")
@@ -181,12 +191,14 @@ def run(args: argparse.Namespace, sess_factory) -> int:
     policy = policy_from(cfg, args.fail_on)
     client = OsvClient()
     if args.function:
-        target, trees, notes, gaps = function_trees(sess_factory(cfg), args.function, args.qualifier, cfg)
+        target, trees, notes, gaps, runtime = function_trees(sess_factory(cfg), args.function, args.qualifier, cfg)
     elif backupdir.is_backup(args.path):
-        target, trees, notes, gaps = backup_trees(args.path)
+        target, trees, notes, gaps, runtime = backup_trees(args.path)
     else:
         target, trees, notes, gaps = str(args.path), [open_path(args.path)], [NOTE_RUNTIME], []
+        runtime = cfg.get("runtime")
     result = scan_trees(target, trees, policy, client, include_dev=args.include_dev, notes=notes, gaps=gaps)
+    result.runtime = runtimes.report(runtime, "scan")
 
     report = result.to_dict()
     if args.report:
@@ -197,4 +209,4 @@ def run(args: argparse.Namespace, sess_factory) -> int:
         sys.stdout.write(json.dumps(report, indent=2) + "\n")
     else:
         render_text(result)
-    return result.exit_code(args.allow_gaps)
+    return result.exit_code(args.allow_gaps, args.allow_deprecated_runtime)

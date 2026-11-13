@@ -110,6 +110,12 @@ aws lambda update-function-code --function-name orders-api-PRD-USE1 \
     --zip-file fileb://orders-api/dist/orders-api-0.0.1.zip --publish
 ```
 
+If you changed `runtime` (for example, off a deprecated one), update the function's configuration as well. `package` prints this command too:
+
+```bash
+aws lambda update-function-configuration --function-name orders-api-PRD-USE1 --runtime python3.13
+```
+
 To deploy the same artifact to other environments, point `--function-name` at each one, such as `orders-api-SBX-USE1`. Afterwards, check production with `lambda-tools scan --function orders-api-PRD-USE1 --region us-east-1`.
 
 ### Starting fresh
@@ -254,7 +260,7 @@ There is no restore command yet. The JSON files keep AWS's own response shapes s
 ```bash
 lambda-tools scan PATH                       # project directory, deployment zip, or backup directory
 lambda-tools scan --function NAME [--qualifier Q]
-    [--fail-on LEVEL] [--allow-gaps] [--include-dev] [--json] [--report FILE]
+    [--fail-on LEVEL] [--allow-gaps] [--allow-deprecated-runtime] [--include-dev] [--json] [--report FILE]
 ```
 
 What it reads:
@@ -276,6 +282,8 @@ With `--function`, the function's code and every layer are downloaded, verified 
 - Unreadable layers
 
 Container image functions exit 2 with a pointer to an image scanner.
+
+**Deprecated runtimes fail the scan** (exit 1) unless you pass `--allow-deprecated-runtime`. The runtime comes from the function, the backup, or `runtime` in `lambda-tools.json`. See [Runtime lifecycle](#runtime-lifecycle).
 
 **Severity.**
 
@@ -386,8 +394,10 @@ Every proposed change is verified before it is written. Written files are backed
 ```bash
 lambda-tools package [PATH] [--bump patch|minor|major | --set-version VERSION] [--execute]
     [--runtime R] [--arch A] [--out DIR] [--fail-on LEVEL]
-    [--allow-vulnerable] [--allow-gaps] [--allow-scripts]
+    [--allow-vulnerable] [--allow-gaps] [--allow-scripts] [--allow-deprecated-runtime]
 ```
+
+`package` refuses to build for a deprecated runtime and names the newest supported one. Change `runtime` in `lambda-tools.json`, test, and build again. `--allow-deprecated-runtime` builds anyway and records that in the changelog's Security section.
 
 1. Copies the source into a temp directory. Default excludes: `.git`, `.venv`, `tests/` and `backups/` at the root, `dist/`, `__pycache__`, `.env*`, `*.pem`, `*.key`, `.npmrc`, `lambda-tools.json`, `CHANGELOG.md`. Symlinks are refused.
 2. Installs dependencies for Lambda's Linux platform:
@@ -417,6 +427,20 @@ Only `package --execute` changes the version. A dry-run shows the next version, 
 If a project's version looks like a date (for example `2026.11.13`) but `versioning` isn't set to `date`, `package` stops rather than raising it to a fake date such as `2026.11.14`. Add `"versioning": "date"`, or pass `--bump` to treat it as `X.Y.Z`.
 
 Commit `.lambda-tools/release-state.json`. It is the baseline for the next release's dependency and security diff, so cleaning `dist/` doesn't lose history.
+
+#### Runtime lifecycle
+
+AWS publishes the [runtime deprecation schedule](https://docs.aws.amazon.com/lambda/latest/dg/lambda-runtimes.html) only as a documentation page, so `lambda-tools` carries a copy, dated when it was checked. Every command that sees a runtime (`backup`, `import`, `scan`, `package`) compares it with today's date:
+
+| Status | When | Effect |
+|---|---|---|
+| Supported | More than 180 days before deprecation | Nothing |
+| Nearing deprecation | Within 180 days of deprecation | Warning, with the runtime to move to |
+| Preview | AWS lists it as preview, such as `python3.15` | Warning: not for production |
+| Unknown | Not in the copied schedule (newer than the copy) | Warning to check the AWS page |
+| Deprecated | On or after the deprecation date | Warning; `scan` and `package` fail unless `--allow-deprecated-runtime` |
+
+After deprecation, Lambda first blocks creating functions on the runtime and later blocks updating them. The message says which stage applies. A copy of the schedule older than a year adds a warning to upgrade `lambda-tools`.
 
 ## IAM permissions
 

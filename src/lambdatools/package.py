@@ -29,7 +29,7 @@ from packaging.utils import canonicalize_name
 from packaging.version import InvalidVersion, Version
 
 from lambdatools import __version__
-from lambdatools.common import changelog, config, proc, pypi, versions
+from lambdatools.common import changelog, config, proc, pypi, runtimes, versions
 from lambdatools.common.fsutil import atomic_write, create_exclusive, git_info, unified_diff, utc_now_iso
 from lambdatools.common.inventory import DirTree
 from lambdatools.common.log import EXIT_FINDINGS, EXIT_OK, WARNINGS, ToolError, log, mode_prefix
@@ -299,6 +299,8 @@ def add_arguments(p: argparse.ArgumentParser) -> None:
     p.add_argument("--fail-on", choices=config.FAIL_ON_CHOICES, help="lowest severity that blocks the build (default: low)")
     p.add_argument("--allow-vulnerable", action="store_true", help="build even if findings meet --fail-on (recorded in the changelog)")
     p.add_argument("--allow-gaps", action="store_true", help="build even if some dependencies could not be scanned")
+    p.add_argument("--allow-deprecated-runtime", action="store_true",
+                   help="build even though the runtime is deprecated (recorded in the changelog)")
     p.add_argument("--allow-scripts", action="store_true", help="run npm install scripts (off by default)")
     p.add_argument("--execute", "--apply", dest="execute", action="store_true", help="write artifact and records (default: dry-run)")
 
@@ -313,6 +315,12 @@ def run(args: argparse.Namespace, sess_factory) -> int:
     runtime = config.resolve(args.runtime, None, cfg, "runtime", None)
     if not config.RUNTIME_RE.match(runtime):
         raise ToolError(f"runtime {runtime!r} is not a supported Lambda runtime")
+    runtime_status = runtimes.report(runtime, "package")
+    if runtime_status.level == "deprecated" and not args.allow_deprecated_runtime:
+        newer = f"\"runtime\": \"{runtime_status.newest}\"" if runtime_status.newest else "a supported runtime"
+        raise ToolError(f"{runtime_status.message}. Refusing to build for a deprecated runtime: set {newer} in "
+                        f"{config.CONFIG_NAME} (and on the function when you deploy), or pass "
+                        "--allow-deprecated-runtime")
     arch = config.resolve(args.arch, None, cfg, "architecture", "x86_64")
     current = cfg.get("version")
     state = config.load_state(root)
@@ -375,6 +383,8 @@ def run(args: argparse.Namespace, sess_factory) -> int:
     sha256 = hashlib.sha256(data).hexdigest()
     deps = dependency_map(result)
     sections = release_sections(state, deps, result, artifact_name, sha256)
+    if runtime_status.level == "deprecated":
+        sections["Security"].append(f"Built for deprecated runtime {runtime} (--allow-deprecated-runtime)")
     today = build_day().isoformat()
     new_log = changelog.release(old_log, version, today, sections)
     manifest = {
@@ -408,5 +418,7 @@ def run(args: argparse.Namespace, sess_factory) -> int:
                      f"sha256 {sha256}\n")
     if args.execute and cfg.get("function_name"):
         sys.stdout.write(f"Deploy: aws lambda update-function-code --function-name {cfg.get('function_name')} "
-                         f"--zip-file fileb://{artifact} --publish\n")
+                         f"--zip-file fileb://{artifact} --publish\n"
+                         f"Runtime: if the function isn't on {runtime} yet, also run aws lambda "
+                         f"update-function-configuration --function-name {cfg.get('function_name')} --runtime {runtime}\n")
     return EXIT_OK
