@@ -228,17 +228,17 @@ def build_project(tree: ZipTree, runtime: str, label: str) -> Project:
         elif "package-lock.json" not in files:
             raise ToolError(f"{label}: the zip has package.json but no package-lock.json, so the deployed dependency "
                             "versions cannot be reproduced; import needs the lockfile")
-    secrets = []
+    withheld = []  # paths only; contents are never read
     for name in files:
         if name in owned or "__pycache__/" in name or name.endswith(".pyc"):
             project.dropped += 1
             continue
         if excluded(name, SECRET_EXCLUDES):
-            secrets.append(name)
+            withheld.append(name)
             continue
         project.files[name] = tree.read(name, limit=MAX_FILE_BYTES)
         project.modes[name] = 0o755 if tree.mode(name) & 0o111 else 0o644
-    _warn_list("import", secrets, "{} looks like a credential file; not imported. Copy it by hand if you need it, "
+    _warn_list("import", withheld, "{} looks like a credential file; not imported. Copy it by hand if you need it, "
                                   "and keep it out of version control")
     if runtime.startswith("python") and not project.pins:
         tops = sorted({_top(f) for f in project.files if "/" in f and (f.endswith("/__init__.py"))})
