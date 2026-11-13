@@ -54,10 +54,9 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
     logmod.setup(verbose=args.verbose, quiet=args.quiet)
 
-    def sess_factory():
+    def sess_factory(cfg=None):
         from lambdatools.common import aws
-        return aws.session(args.profile or os.environ.get("AWS_PROFILE"),
-                           args.region or os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION"))
+        return aws.session(args.profile or os.environ.get("AWS_PROFILE"), aws.resolve_region(args.region, cfg))
 
     code = EXIT_ERROR
     try:

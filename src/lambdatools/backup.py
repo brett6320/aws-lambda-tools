@@ -249,7 +249,7 @@ def add_arguments(p: argparse.ArgumentParser) -> None:
 
 def run(args: argparse.Namespace, sess_factory) -> int:
     cfg = config.load_project(args.project)
-    sess = sess_factory()
+    sess = sess_factory(cfg)
     lam, iam = aws.client(sess, "lambda"), aws.client(sess, "iam")
     caller = aws.caller_account(sess)
     try:
@@ -257,7 +257,7 @@ def run(args: argparse.Namespace, sess_factory) -> int:
                                                    **({"Qualifier": args.qualifier} if args.qualifier else {}))
     except ClientError as e:
         raise ToolError(f"get_function_configuration {args.function}: {aws.error_code(e)}") from None
-    aws.check_function_scope(preflight["FunctionArn"], caller, cfg.get("account_id"), cfg.get("region"))
+    aws.check_function_scope(preflight["FunctionArn"], caller, cfg.get("account_id"), sess.region_name)
     del preflight  # holds environment values; the redacted copy comes from collect()
 
     files, code_info, missing = collect(lam, iam, args.function, args.qualifier, include_iam=not args.no_iam)

@@ -61,7 +61,7 @@ def _all_bytes(root: Path) -> bytes:
 
 
 def test_backup_dry_run_writes_nothing(tmp_path, lambda_env, capsys):
-    backup.run(_backup_args(tmp_path, execute=False), lambda: lambda_env)
+    backup.run(_backup_args(tmp_path, execute=False), lambda *_: lambda_env)
     out = json.loads(capsys.readouterr().out)
     assert out["written"] is False and out["environment_values"] == "redacted"
     assert not (tmp_path / "backups").exists()
@@ -69,7 +69,7 @@ def test_backup_dry_run_writes_nothing(tmp_path, lambda_env, capsys):
 
 def test_backup_redacts_when_pass_missing(tmp_path, lambda_env, capsys, monkeypatch):
     monkeypatch.setenv("PATH", str(tmp_path / "empty-bin"))
-    code = backup.run(_backup_args(tmp_path, execute=True), lambda: lambda_env)
+    code = backup.run(_backup_args(tmp_path, execute=True), lambda *_: lambda_env)
     out = json.loads(capsys.readouterr().out)
     # moto does not implement these APIs; unreadable surfaces must make the backup incomplete.
     moto_gaps = {"function-urls", "provisioned-concurrency", "recursion", "runtime-management:$LATEST",
@@ -105,7 +105,7 @@ def test_backup_stores_values_in_pass(tmp_path, lambda_env, capsys, monkeypatch)
     monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
     monkeypatch.setenv("PASSWORD_STORE_DIR", str(store))
 
-    backup.run(_backup_args(tmp_path, execute=True), lambda: lambda_env)
+    backup.run(_backup_args(tmp_path, execute=True), lambda *_: lambda_env)
     out = json.loads(capsys.readouterr().out)
     assert out["environment_values"] == "pass"
     assert out["pass_path"].startswith("lambda-tools/123456789012/us-east-1/fn/")
@@ -119,7 +119,7 @@ def test_backup_refuses_unignored_git_location(tmp_path, lambda_env):
     import subprocess
     subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
     with pytest.raises(ToolError, match="not ignored"):
-        backup.run(_backup_args(tmp_path, execute=True), lambda: lambda_env)
+        backup.run(_backup_args(tmp_path, execute=True), lambda *_: lambda_env)
 
 
 def test_scope_check_rejects_other_account():
@@ -298,7 +298,7 @@ def test_node_remediate_writes_nothing_without_bumps(tmp_path, monkeypatch):
 
 def test_backup_parent_dirs_are_private(tmp_path, lambda_env, monkeypatch):
     monkeypatch.setenv("PATH", str(tmp_path / "empty-bin"))
-    backup.run(_backup_args(tmp_path, execute=True), lambda: lambda_env)
+    backup.run(_backup_args(tmp_path, execute=True), lambda *_: lambda_env)
     for d in (tmp_path / "backups").rglob("*"):
         if d.is_dir():
             assert stat.S_IMODE(d.stat().st_mode) == 0o700, d
@@ -677,3 +677,46 @@ def test_import_unhashed_record_row_does_not_claim_user_file(tmp_path, capsys):
     code["requests-2.25.0.dist-info/RECORD"] += "utils.py,,\n"
     importer.run(_import_args(_fake_backup(tmp_path / "b", code=code), tmp_path / "p"), None)
     assert (tmp_path / "p/utils.py").read_text() == "mine\n"
+
+
+
+
+def _cfg(region):
+    from lambdatools.common import config as cfgmod
+    return cfgmod.ProjectConfig(path=Path("lambda-tools.json"), data={"region": region} if region else {})
+
+
+@pytest.fixture
+def no_region_env(monkeypatch):
+    for var in ("AWS_REGION", "AWS_DEFAULT_REGION"):
+        monkeypatch.delenv(var, raising=False)
+    return monkeypatch
+
+
+def test_region_comes_from_config_when_not_given(no_region_env):
+    assert aws.resolve_region(None, _cfg("eu-west-1")) == "eu-west-1"
+    assert aws.resolve_region(None, None) is None
+
+
+@pytest.mark.parametrize("flag,env", [("us-west-2", None), (None, "us-west-2")])
+def test_region_flag_or_env_overrides_config_with_warning(no_region_env, flag, env):
+    from lambdatools.common.log import WARNINGS
+    if env:
+        no_region_env.setenv("AWS_REGION", env)
+    assert aws.resolve_region(flag, _cfg("eu-west-1")) == "us-west-2"
+    assert any("overrides region eu-west-1" in m for m in WARNINGS._items["aws"])
+
+
+def test_scope_check_rejects_function_outside_session_region():
+    with pytest.raises(ToolError, match="this run uses region us-west-2"):
+        aws.check_function_scope("arn:aws:lambda:us-east-1:111111111111:function:x", "111111111111", None, "us-west-2")
+
+
+def test_backup_with_explicit_region_differing_from_config(tmp_path, lambda_env, capsys):
+    # regression: an explicit region (here the session's us-east-1) that differs from the config used to be an error
+    (tmp_path / "proj").mkdir()
+    (tmp_path / "proj" / "lambda-tools.json").write_text(json.dumps({"region": "us-west-2"}))
+    args = _backup_args(tmp_path, execute=False)
+    args.project = tmp_path / "proj"
+    backup.run(args, lambda *_: lambda_env)  # used to raise ToolError: region mismatch
+    assert json.loads(capsys.readouterr().out)["written"] is False

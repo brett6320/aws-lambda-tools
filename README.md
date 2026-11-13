@@ -92,7 +92,8 @@ Settings resolve in this order: **CLI flag > environment variable > `lambda-tool
 | `exclude` | package | Extra patterns. `/x` matches only at the project root; a pattern without `/` matches any path segment; anything else matches the whole relative path |
 | `fail_on` | scan, package, remediate | Lowest failing severity: `low` (default), `medium`, `high`, `critical`, `none` |
 | `ignore` | scan, package, remediate | Accepted risks. Each needs an `id` (or alias), `reason`, and `expires`. Expired entries stop applying and produce a warning. Ignored findings are still listed and recorded in the changelog |
-| `account_id`, `region` | backup, scan | If set, the function must be in this account and region |
+| `account_id` | backup, scan | If set, the function must be in this account |
+| `region` | backup, scan | Region to use when neither `--region` nor `AWS_REGION` is set. When one of them is set, it wins and a warning names both regions |
 
 | Environment variable | Meaning |
 |---|---|
