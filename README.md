@@ -80,6 +80,15 @@ lambda-tools package ./orders-api --execute      # dist/orders-api-0.0.1.zip + .
 
 Dependencies are installed for Lambda's Linux platform and scanned again. The build stops if anything at or above `fail_on` turns up. The version goes up (see [Versions](#versions)), and the changelog gets a section for it.
 
+**Choosing the version with `--set-version`.** An imported project starts at `0.0.0`, so its first build is `0.0.1` (or today's date with `"versioning": "date"`). To match the version you already use for the function, set it explicitly. It must be later than the current version:
+
+```bash
+lambda-tools package ./orders-api --set-version 1.5.0 --execute          # X.Y.Z versioning
+lambda-tools package ./orders-api --set-version 2026.11.13 --execute     # date versioning
+```
+
+After that, builds count up from the version you set. `--set-version` and `--bump` can't be combined. With date versioning, `--bump` is refused.
+
 ### 6. Deploy
 
 `lambda-tools` doesn't deploy. `package --execute` prints the command for the function in `function_name`:
