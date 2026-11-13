@@ -101,7 +101,7 @@ def function_trees(sess, function: str, qualifier: str | None,
         raise ToolError(f"get_function {function}: {aws.error_code(e)}") from None
     conf = fn["Configuration"]
     aws.check_function_scope(conf["FunctionArn"], aws.caller_account(sess),
-                             cfg.get("account_id") if cfg else None, cfg.get("region") if cfg else None)
+                             cfg.get("account_id") if cfg else None, sess.region_name)
     if conf.get("PackageType") == "Image":
         raise ToolError(
             f"{conf['FunctionName']} is a container image function ({fn['Code'].get('ImageUri')}); "
@@ -181,7 +181,7 @@ def run(args: argparse.Namespace, sess_factory) -> int:
     policy = policy_from(cfg, args.fail_on)
     client = OsvClient()
     if args.function:
-        target, trees, notes, gaps = function_trees(sess_factory(), args.function, args.qualifier, cfg)
+        target, trees, notes, gaps = function_trees(sess_factory(cfg), args.function, args.qualifier, cfg)
     elif backupdir.is_backup(args.path):
         target, trees, notes, gaps = backup_trees(args.path)
     else:
