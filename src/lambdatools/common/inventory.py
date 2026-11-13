@@ -28,6 +28,8 @@ MAX_MEMBER_BYTES = 20 * 1024 * 1024
 MAX_ZIP_UNCOMPRESSED = 1024 * 1024 * 1024
 
 SKIP_DIRS = {".git", ".venv", "venv", ".tox", "__pycache__", ".lambda-tools", "dist", ".pytest_cache"}
+# Skipped only at the top of the tree: `lambda-tools backup --out ./backups` output.
+ROOT_SKIP_DIRS = {"backups"}
 
 UNSUPPORTED_MANIFESTS = {
     "yarn.lock": "yarn.lock",
@@ -119,7 +121,9 @@ class DirTree(Tree):
         self._files: list[str] = []
         for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
             rel_dir = Path(dirpath).relative_to(root)
-            dirnames[:] = sorted(d for d in dirnames if d not in skip_dirs or rel_dir.parts[:1] == ("node_modules",))
+            dirnames[:] = sorted(d for d in dirnames
+                                 if (d not in skip_dirs or rel_dir.parts[:1] == ("node_modules",))
+                                 and not (rel_dir == Path(".") and d in ROOT_SKIP_DIRS))
             for f in filenames:
                 p = Path(dirpath) / f
                 if p.is_symlink() or not p.is_file():

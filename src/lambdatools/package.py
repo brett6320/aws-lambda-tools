@@ -38,7 +38,7 @@ UNZIPPED_LIMIT = 250 * 1024 * 1024
 # "/x" matches x at the project root only; a pattern without "/" matches any
 # path segment; any other pattern is matched against the whole relative path.
 DEFAULT_EXCLUDES = [
-    "/.venv", "/venv", "/dist", "/.lambda-tools", "/node_modules", "/tests", "/.pytest_cache",
+    "/.venv", "/venv", "/dist", "/.lambda-tools", "/node_modules", "/tests", "/.pytest_cache", "/backups",
     "/lambda-tools.json", "/CHANGELOG.md", "/.gitignore",
     ".git", "__pycache__", "*.pyc", ".DS_Store",
     # credentials and local state that must never ship
