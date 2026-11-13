@@ -373,7 +373,10 @@ def write_project(dest: Path, files: dict[str, bytes], modes: dict[str, int]) ->
 
 def add_arguments(p: argparse.ArgumentParser) -> None:
     p.add_argument("backup", type=Path, help="backup directory written by `lambda-tools backup --execute`")
-    p.add_argument("--to", type=Path, help="new project directory (default: ./<function name>)")
+    p.add_argument("--name", help="project name for lambda-tools.json, artifacts, and the default --to "
+                                  "(default: the function name). Use it to drop environment or region suffixes, "
+                                  "e.g. orders-api-PRD-USE1 -> orders-api; function_name keeps the deployed name")
+    p.add_argument("--to", type=Path, help="new project directory (default: ./<name>)")
     p.add_argument("--execute", "--apply", dest="execute", action="store_true", help="write the project (default: dry-run)")
 
 
@@ -385,9 +388,13 @@ def run(args: argparse.Namespace, sess_factory) -> int:
     runtime = conf.get("Runtime", "")
     if not config.RUNTIME_RE.match(runtime):
         raise ToolError(f"runtime {runtime or '(none)'!r} is not supported; import handles python3.x and nodejsNN.x")
-    name = conf.get("FunctionName")
-    if not name:
+    function_name = conf.get("FunctionName")
+    if not function_name:
         raise ToolError(f"{backup.path}/function.json has no FunctionName")
+    name = args.name or function_name
+    check, description = config.SCHEMA["name"]
+    if not check(name):
+        raise ToolError(f"--name {clean(name, 100)!r} must be {description}")
     dest = (args.to or Path.cwd() / name).resolve()
     if dest.exists() and (not dest.is_dir() or any(dest.iterdir())):
         raise ToolError(f"{dest} already exists and is not empty; choose another --to")
@@ -413,8 +420,11 @@ def run(args: argparse.Namespace, sess_factory) -> int:
         if generated in files:
             WARNINGS.add("import", f"the zip already has {generated}; kept it instead of generating one. Check that "
                                    "its version and settings match what is deployed")
+    if config.CONFIG_NAME in files and args.name:
+        WARNINGS.add("import", f"--name {name} was not applied: the zip's own {config.CONFIG_NAME} was kept; "
+                               "set its \"name\" by hand")
     if config.CONFIG_NAME not in files:
-        cfg = {"name": name, "function_name": name, "runtime": runtime,
+        cfg = {"name": name, "function_name": function_name, "runtime": runtime,
                "architecture": (conf.get("Architectures") or ["x86_64"])[0], "version": IMPORTED_VERSION,
                "handler": handler, "account_id": backup.manifest.get("account"),
                "region": backup.manifest.get("region")}
@@ -424,7 +434,8 @@ def run(args: argparse.Namespace, sess_factory) -> int:
         modes[config.CONFIG_NAME] = 0o644
     if "CHANGELOG.md" not in files:
         files["CHANGELOG.md"] = changelog.add_unreleased(None, [
-            f"Imported from {backup.label} (CodeSha256 `{conf.get('CodeSha256')}`); "
+            f"Imported from {backup.label}{f' as {name}' if name != function_name else ''} "
+            f"(CodeSha256 `{conf.get('CodeSha256')}`); "
             f"{len(project.pins)} dependencies pinned to the deployed versions"]).encode()
         modes["CHANGELOG.md"] = 0o644
     if conf.get("Layers"):
@@ -443,7 +454,8 @@ def run(args: argparse.Namespace, sess_factory) -> int:
         log.info("Dry-run: nothing written. Pass --execute to create the project.")
 
     sys.stdout.write(json.dumps({
-        "project": str(dest), "written": bool(args.execute), "files": sorted(files),
+        "project": str(dest), "name": name, "function_name": function_name, "written": bool(args.execute),
+        "files": sorted(files),
         "pinned": [f"{n}=={v}" for n, v in project.pins], "dependency_files_left_out": project.dropped,
         "next": [f"lambda-tools scan {dest}", f"lambda-tools remediate {dest}", f"lambda-tools package {dest}"],
     }, indent=2) + "\n")
