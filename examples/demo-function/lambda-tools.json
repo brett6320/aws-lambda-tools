@@ -1,0 +1,6 @@
+{
+  "name": "demo-function",
+  "runtime": "python3.12",
+  "architecture": "arm64",
+  "version": "0.1.0"
+}
