@@ -19,18 +19,95 @@ Supports Python (`requirements.txt`) and Node.js (`package-lock.json` v2/v3) fun
 
 Every command that changes something is a **dry-run by default**. It shows what would change; pass `--execute` (or `--apply`) to do it.
 
-## A typical workflow
+## Quick start
+
+The example function is `orders-api-PRD-USE1`: the `orders-api` service, deployed to production in us-east-1. Every command is a dry-run until you add `--execute`. Read what it would do first, then run it again with the flag.
+
+**Already have the function's source?** Skip to [step 3](#3-scan). **Starting a brand-new function?** See [Starting fresh](#starting-fresh) below.
+
+### 1. Back up what's deployed
 
 ```bash
-lambda-tools backup my-function --execute         # snapshot what is deployed now
-lambda-tools scan --function my-function          # what is vulnerable in production?
-lambda-tools import backups/<account>/<region>/my-function/<id> --to ./my-function-src --execute
-                                                  # only when you have no source checkout
-lambda-tools remediate ./my-function-src          # review the proposed upgrades
-lambda-tools remediate ./my-function-src --execute
-lambda-tools package ./my-function-src            # dry-run: version, changelog diff, sha256
-lambda-tools package ./my-function-src --execute  # dist/my-function-1.4.3.zip + manifest
+lambda-tools backup orders-api-PRD-USE1 --region us-east-1 --out ./backups            # dry-run
+lambda-tools backup orders-api-PRD-USE1 --region us-east-1 --out ./backups --execute
 ```
+
+This saves the code, configuration, versions, aliases, permissions, triggers, and execution role to `./backups/<account>/us-east-1/orders-api-PRD-USE1/<UTC timestamp>/`. Environment variable values go to `pass`, or are redacted if `pass` isn't set up. The path is printed as `"backup"` in the JSON output. To capture it:
+
+```bash
+BACKUP=$(lambda-tools backup orders-api-PRD-USE1 --region us-east-1 --out ./backups --execute -q | jq -r .backup)
+```
+
+`./backups` is a good spot inside a repository because git ignores it. Exit code 1 means some part couldn't be read; the `"missing"` list says which.
+
+### 2. Import the backup as a project
+
+```bash
+lambda-tools import "$BACKUP" --name orders-api                        # dry-run: lists the files and pins
+lambda-tools import "$BACKUP" --name orders-api --execute              # writes ./orders-api/
+```
+
+`--name` drops the environment and region suffixes, so one project can serve every deployment of the function. The project, the artifacts (`dist/orders-api-…zip`), and the default `--to` folder use the new name, while `function_name` in `lambda-tools.json` keeps `orders-api-PRD-USE1` for the deploy command. Leave `--name` out to keep the function name.
+
+The project gets your code without the installed packages, a `requirements.txt` pinned to the exact versions that were deployed, a `lambda-tools.json`, and a `CHANGELOG.md`. Look over the warnings. Then:
+
+- To use date versions such as `2026.11.13`, add `"versioning": "date"` to `lambda-tools.json`. See [Versions](#versions).
+- Commit the project to git, so every later change shows up as a diff.
+
+### 3. Scan
+
+```bash
+lambda-tools scan ./orders-api
+```
+
+This lists each vulnerable package with its severity, the version that fixes it, and the advisory IDs. Exit 0 means clean. Exit 1 means findings or coverage gaps, which are things that couldn't be checked, such as unpinned requirements. To check what's actually running instead of the project, use `lambda-tools scan --function orders-api-PRD-USE1 --region us-east-1`.
+
+### 4. Remediate
+
+```bash
+lambda-tools remediate ./orders-api              # dry-run: shows the requirements.txt diff
+lambda-tools remediate ./orders-api --execute    # writes it, and records the upgrades in CHANGELOG.md
+```
+
+Each vulnerable package is upgraded to the lowest version that fixes all of its known advisories. Each one is checked by re-resolving the dependencies and scanning again before anything is written. Whatever is left (no fix available, a version range it won't rewrite, or a file it doesn't manage) is listed at the end, and the exit code is 1.
+
+### 5. Package
+
+```bash
+lambda-tools package ./orders-api                # dry-run: next version, changelog diff, sha256
+lambda-tools package ./orders-api --execute      # dist/orders-api-0.0.1.zip + .manifest.json
+```
+
+Dependencies are installed for Lambda's Linux platform and scanned again. The build stops if anything at or above `fail_on` turns up. The version goes up (see [Versions](#versions)), and the changelog gets a section for it.
+
+### 6. Deploy
+
+`lambda-tools` doesn't deploy. `package --execute` prints the command for the function in `function_name`:
+
+```bash
+aws lambda update-function-code --function-name orders-api-PRD-USE1 \
+    --zip-file fileb://orders-api/dist/orders-api-0.0.1.zip --publish
+```
+
+To deploy the same artifact to other environments, point `--function-name` at each one, such as `orders-api-SBX-USE1`. Afterwards, check production with `lambda-tools scan --function orders-api-PRD-USE1 --region us-east-1`.
+
+### Starting fresh
+
+For a new function, create `lambda-tools.json` next to your code:
+
+```json
+{
+  "name": "orders-api",
+  "function_name": "orders-api-PRD-USE1",
+  "runtime": "python3.13",
+  "architecture": "arm64",
+  "handler": "handler.handler",
+  "version": "0.0.0",
+  "versioning": "date"
+}
+```
+
+Then list your dependencies in `requirements.txt` (or `package.json` plus `package-lock.json` for Node.js), and follow steps 3–6.
 
 ## Example
 
@@ -189,7 +266,7 @@ Container image functions exit 2 with a pointer to an image scanner.
 ### import
 
 ```bash
-lambda-tools import BACKUP_DIR [--to DIR] [--execute]
+lambda-tools import BACKUP_DIR [--name NAME] [--to DIR] [--execute]
 ```
 
 Use this when the deployed function has no source checkout. It turns a backup's `code.zip` into a project that `scan`, `remediate`, and `package` can work on. The backup is checked against its manifest checksums first.
@@ -215,7 +292,9 @@ Import refuses, and writes nothing, when:
 
 Credential files (`.env*`, `.npmrc`, `.pypirc`, `*.pem`, `*.key`, and others) and environment variable values are never written. `__pycache__`, symlinks, and unsafe zip paths are skipped. Layers aren't part of the project.
 
-`--to` defaults to `./<function name>`, and that directory must not exist or must be empty. The project is written to a temp directory beside it and then renamed into place.
+`--name` sets the project name used in `lambda-tools.json`, in artifact names, and as the default `--to`. Use it to drop environment or region suffixes, for example `orders-api-PRD-USE1` → `orders-api`. `function_name` keeps the deployed name. If the zip already has its own `lambda-tools.json`, that file is kept and `--name` isn't applied (you get a warning).
+
+`--to` defaults to `./<name>`, and that directory must not exist or must be empty. The project is written to a temp directory beside it and then renamed into place.
 
 ### remediate
 

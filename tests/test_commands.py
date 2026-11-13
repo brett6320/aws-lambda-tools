@@ -394,8 +394,8 @@ def test_scan_dir_with_only_archives_is_a_gap(tmp_path, monkeypatch, capsys):
     assert "archives are not opened" in json.loads(capsys.readouterr().out)["coverage_gaps"][0]
 
 
-def _import_args(backup_dir, to, execute=True):
-    return argparse.Namespace(backup=backup_dir, to=to, execute=execute)
+def _import_args(backup_dir, to, execute=True, name=None):
+    return argparse.Namespace(backup=backup_dir, to=to, execute=execute, name=name)
 
 
 PY_CODE = {
@@ -932,3 +932,42 @@ def test_package_with_date_versioning_end_to_end(tmp_path, monkeypatch, capsys):
     assert json.loads((tmp_path / "lambda-tools.json").read_text())["version"] == "2026.11.03.1"
     log = (tmp_path / "CHANGELOG.md").read_text()
     assert "## [2026.11.03.1] - 2026-11-03" in log and "## [2026.11.03] - 2026-11-03" in log
+
+
+def test_import_name_renames_project_but_keeps_function_name(tmp_path, monkeypatch, capsys):
+    from lambdatools import importer
+    backup_dir = _fake_backup(tmp_path / "b", code=PY_CODE)
+    monkeypatch.chdir(tmp_path)
+    assert importer.run(_import_args(backup_dir, None, name="orders"), None) == 0
+    cfg = json.loads((tmp_path / "orders" / "lambda-tools.json").read_text())
+    assert cfg["name"] == "orders" and cfg["function_name"] == "orders-api"
+    assert "function:orders-api as orders (CodeSha256" in (tmp_path / "orders" / "CHANGELOG.md").read_text()
+    out = json.loads(capsys.readouterr().out)
+    assert out["name"] == "orders" and out["function_name"] == "orders-api"
+
+
+def test_import_name_is_validated(tmp_path):
+    from lambdatools import importer
+    backup_dir = _fake_backup(tmp_path / "b", code=PY_CODE)
+    with pytest.raises(ToolError, match="--name"):
+        importer.run(_import_args(backup_dir, tmp_path / "p", name="bad/name"), None)
+
+
+def test_import_name_not_applied_over_zip_config_warns(tmp_path, capsys):
+    from lambdatools import importer
+    code = dict(PY_CODE, **{"lambda-tools.json": '{"name": "old"}'})
+    importer.run(_import_args(_fake_backup(tmp_path / "b", code=code), tmp_path / "p", name="orders"), None)
+    assert json.loads((tmp_path / "p" / "lambda-tools.json").read_text())["name"] == "old"
+    assert "--name orders was not applied" in _import_warnings()
+
+
+def test_package_artifact_uses_renamed_project(tmp_path, monkeypatch, capsys):
+    from lambdatools import importer
+    backup_dir = _fake_backup(tmp_path / "b", code={"handler.py": "def handler(e, c):\n    return 1\n"})
+    importer.run(_import_args(backup_dir, tmp_path / "p", name="orders"), None)
+    capsys.readouterr()
+    monkeypatch.setattr(urllib.request, "urlopen", FakeOsv())
+    assert package.run(_package_args(tmp_path / "p"), None) == 0
+    out = capsys.readouterr().out
+    assert (tmp_path / "p" / "dist" / "orders-0.0.1.zip").exists()
+    assert "--function-name orders-api " in out
