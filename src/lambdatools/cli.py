@@ -2,10 +2,17 @@
 
 from __future__ import annotations
 
-import argparse
-import os
-import sys
-import traceback
+# Must run before anything imports botocore or urllib3: they keep a reference
+# to the original ssl.SSLContext, and injecting afterwards makes its options
+# setter recurse forever (RecursionError on the first AWS call).
+import truststore
+
+truststore.inject_into_ssl()
+
+import argparse  # noqa: E402
+import os  # noqa: E402
+import sys  # noqa: E402
+import traceback  # noqa: E402
 
 from lambdatools import __version__
 from lambdatools.common import log as logmod
@@ -45,9 +52,6 @@ def main(argv: list[str] | None = None) -> None:
     parser, modules = build_parser()
     args = parser.parse_args(argv)
     logmod.setup(verbose=args.verbose, quiet=args.quiet)
-
-    import truststore
-    truststore.inject_into_ssl()
 
     def sess_factory():
         from lambdatools.common import aws

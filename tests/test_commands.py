@@ -302,3 +302,16 @@ def test_backup_parent_dirs_are_private(tmp_path, lambda_env, monkeypatch):
     for d in (tmp_path / "backups").rglob("*"):
         if d.is_dir():
             assert stat.S_IMODE(d.stat().st_mode) == 0o700, d
+
+
+def test_cli_aws_call_does_not_recurse_in_ssl(tmp_path):
+    """Regression: truststore must be injected before botocore is imported."""
+    import subprocess
+    import sys
+    env = {**os.environ, "PYTHONPATH": str(Path(__file__).parents[1] / "src"),
+           "AWS_ACCESS_KEY_ID": "x", "AWS_SECRET_ACCESS_KEY": "x", "AWS_EC2_METADATA_DISABLED": "true",
+           "AWS_ENDPOINT_URL": "http://127.0.0.1:9"}
+    result = subprocess.run([sys.executable, "-m", "lambdatools", "scan", "--function", "nope", "--region", "us-east-1"],
+                            capture_output=True, text=True, env=env, timeout=120, cwd=tmp_path)
+    assert "RecursionError" not in result.stderr, result.stderr[-2000:]
+    assert result.returncode == 2
