@@ -1,2 +1,2 @@
 # DEMO ONLY: deliberately vulnerable pin so `lambda-tools scan` has findings.
-requests==2.25.0
+requests==2.33.0
