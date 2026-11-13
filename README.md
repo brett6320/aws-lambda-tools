@@ -1,5 +1,10 @@
 # lambda-tools
 
+[![CI](https://github.com/brett6320/aws-lambda-tools/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/brett6320/aws-lambda-tools/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/brett6320/aws-lambda-tools/actions/workflows/codeql.yml/badge.svg?branch=main)](https://github.com/brett6320/aws-lambda-tools/actions/workflows/codeql.yml)
+[![Coverage](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fbrett6320%2Faws-lambda-tools%2Fbadges%2Fcoverage.json)](https://github.com/brett6320/aws-lambda-tools/actions/workflows/ci.yml)
+[![Python](https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13%20%7C%203.14-blue)](pyproject.toml)
+
 Find and fix known vulnerabilities in AWS Lambda functions the same way every time:
 
 | Command | What it does | Touches AWS |
