@@ -10,3 +10,5 @@ reports/
 .env
 .env.*
 *.pem
+.coverage
+coverage.json
