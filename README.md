@@ -210,7 +210,7 @@ lambda-tools package [PATH] [--bump patch|minor|major | --set-version X.Y.Z] [--
     [--allow-vulnerable] [--allow-gaps] [--allow-scripts]
 ```
 
-1. Copies the source into a temp directory. Default excludes: `.git`, `.venv`, `tests/` at the root, `dist/`, `__pycache__`, `.env*`, `*.pem`, `*.key`, `.npmrc`, `lambda-tools.json`, `CHANGELOG.md`. Symlinks are refused.
+1. Copies the source into a temp directory. Default excludes: `.git`, `.venv`, `tests/` and `backups/` at the root, `dist/`, `__pycache__`, `.env*`, `*.pem`, `*.key`, `.npmrc`, `lambda-tools.json`, `CHANGELOG.md`. Symlinks are refused.
 2. Installs dependencies for Lambda's Linux platform:
    - **Python:** `pip install --target --platform manylinux2014_<arch> --only-binary=:all:`.
    - **Node.js:** `npm ci --omit=dev --os=linux --cpu=<arch> --ignore-scripts`. Native modules that aren't Linux binaries fail the build with advice to build in a container.

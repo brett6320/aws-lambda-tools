@@ -315,3 +315,15 @@ def test_cli_aws_call_does_not_recurse_in_ssl(tmp_path):
                             capture_output=True, text=True, env=env, timeout=120, cwd=tmp_path)
     assert "RecursionError" not in result.stderr, result.stderr[-2000:]
     assert result.returncode == 2
+
+
+def test_root_backups_dir_is_never_packaged_or_scanned(tmp_path):
+    from lambdatools.common.inventory import DirTree
+    (tmp_path / "backups" / "x").mkdir(parents=True)
+    (tmp_path / "backups" / "x" / "function.json").write_text("{}")
+    (tmp_path / "lib" / "backups").mkdir(parents=True)
+    (tmp_path / "lib" / "backups" / "mod.py").write_text("")
+    assert package.excluded("backups", package.DEFAULT_EXCLUDES)
+    assert not package.excluded("lib/backups", package.DEFAULT_EXCLUDES)
+    files = DirTree(tmp_path).files()
+    assert "lib/backups/mod.py" in files and not any(f.startswith("backups/") for f in files)
