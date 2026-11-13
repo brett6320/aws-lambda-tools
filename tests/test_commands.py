@@ -150,7 +150,8 @@ def _py_project(root: Path, vendored=None):
 
 def _package_args(root, execute=True, **kw):
     base = dict(path=root, bump=None, set_version=None, runtime=None, arch=None, out=None, fail_on=None,
-                allow_vulnerable=False, allow_gaps=False, allow_scripts=False, execute=execute)
+                allow_vulnerable=False, allow_gaps=False, allow_scripts=False, allow_deprecated_runtime=False,
+                execute=execute)
     base.update(kw)
     return argparse.Namespace(**base)
 
@@ -363,7 +364,7 @@ def _fake_backup(root: Path, layers=(), code=None, tamper=False, runtime="python
 
 def _scan_args(path, **kw):
     base = dict(path=path, function=None, qualifier=None, project=None, fail_on=None, allow_gaps=False,
-                include_dev=False, json=True, report=None)
+                include_dev=False, json=True, report=None, allow_deprecated_runtime=False)
     base.update(kw)
     return argparse.Namespace(**base)
 
@@ -1364,3 +1365,49 @@ def test_test_init_dry_run_then_execute(tmp_path):
     assert json.loads((tmp_path / "tests" / "smoke_config.json").read_text())["handler"] == "app.handler"
     with pytest.raises(ToolError, match="already exist"):
         smoke.run(args, None)
+
+
+def test_runtime_check_levels():
+    from datetime import date
+    from lambdatools.common import runtimes
+    on = date(2026, 11, 13)
+    assert runtimes.check("python3.13", on).level == "ok"
+    status = runtimes.check("python3.10", on)
+    assert status.level == "deprecated" and "deprecated on 2026-10-31" in status.message
+    assert "move to python3.14" in status.message
+    nearing = runtimes.check("python3.11", date(2027, 3, 1))  # deprecated 2027-06-30, within WARN_DAYS
+    assert nearing.level == "warn" and "will be deprecated on 2027-06-30" in nearing.message
+    assert runtimes.check("python3.15", on).level == "warn"  # preview
+    assert runtimes.check("python3.99", on).level == "warn"  # unknown is never "ok"
+    assert runtimes.check("nodejs20.x", on).level == "deprecated"
+    assert runtimes.newest_supported("nodejs18.x", on) == "nodejs24.x"
+    assert runtimes.check("python3.13", date(2029, 7, 1)).level == "deprecated"
+    assert runtimes.stale_table_warning(on) is None
+    assert "last checked" in runtimes.stale_table_warning(date(2028, 1, 1))
+
+
+def _deprecated_project(root):
+    _py_project(root)
+    cfg = json.loads((root / "lambda-tools.json").read_text())
+    (root / "lambda-tools.json").write_text(json.dumps({**cfg, "runtime": "python3.9"}, indent=2) + "\n")
+
+
+def test_package_refuses_deprecated_runtime_unless_allowed(tmp_path, monkeypatch, capsys):
+    _deprecated_project(tmp_path)
+    monkeypatch.setattr(urllib.request, "urlopen", FakeOsv())
+    with pytest.raises(ToolError, match="python3.9 was deprecated.*--allow-deprecated-runtime"):
+        package.run(_package_args(tmp_path), None)
+    assert not (tmp_path / "dist").exists()
+    assert package.run(_package_args(tmp_path, allow_deprecated_runtime=True), None) == 0
+    assert "Built for deprecated runtime python3.9" in (tmp_path / "CHANGELOG.md").read_text()
+    assert "update-function-configuration --function-name demo-fn --runtime python3.9" in capsys.readouterr().out
+
+
+def test_scan_fails_on_deprecated_runtime(tmp_path, monkeypatch, capsys):
+    from lambdatools import scan
+    backup_dir = _fake_backup(tmp_path / "b", runtime="python3.9")
+    monkeypatch.setattr(urllib.request, "urlopen", FakeOsv())
+    assert scan.run(_scan_args(backup_dir), None) == 1
+    report = json.loads(capsys.readouterr().out)
+    assert report["runtime"]["status"] == "deprecated" and report["findings"] == []
+    assert scan.run(_scan_args(backup_dir, allow_deprecated_runtime=True), None) == 0

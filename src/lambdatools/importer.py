@@ -31,7 +31,7 @@ from packaging.requirements import InvalidRequirement, Requirement
 from packaging.utils import canonicalize_name
 
 from lambdatools import smoke
-from lambdatools.common import backupdir, changelog, config
+from lambdatools.common import backupdir, changelog, config, runtimes
 from lambdatools.common.inventory import ZipTree
 from lambdatools.common.log import EXIT_OK, WARNINGS, ToolError, log, mode_prefix
 from lambdatools.common.sanitize import clean, valid_package_name, valid_version
@@ -389,6 +389,7 @@ def run(args: argparse.Namespace, sess_factory) -> int:
     runtime = conf.get("Runtime", "")
     if not config.RUNTIME_RE.match(runtime):
         raise ToolError(f"runtime {runtime or '(none)'!r} is not supported; import handles python3.x and nodejsNN.x")
+    runtimes.report(runtime, "import")
     function_name = conf.get("FunctionName")
     if not function_name:
         raise ToolError(f"{backup.path}/function.json has no FunctionName")
