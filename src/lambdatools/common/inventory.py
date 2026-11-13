@@ -381,6 +381,11 @@ def build_inventory(tree: Tree, include_dev: bool = False, installed: bool | Non
         elif base in ("pyproject.toml", "setup.py", "setup.cfg") and posixpath.dirname(name) == "":
             if not any(_is_requirements_file(f) for f in files) and not installed_py:
                 inv.gap(f"{tree.label}:{name}: {base} without requirements.txt is not supported")
+    # Archives in a directory are not opened; with nothing else found that must not read as clean.
+    archives = [f for f in files if f.endswith(".zip") and "node_modules/" not in f]
+    if isinstance(tree, DirTree) and not inv.dependencies and archives:
+        inv.gap(f"{tree.label}: no dependency manifests found, and archives are not opened "
+                f"({', '.join(archives[:3])}); scan an archive directly with `lambda-tools scan FILE.zip`")
     # A deployed zip with code but no metadata may be a bundle or vendored code.
     if isinstance(tree, ZipTree) and not inv.dependencies and any(f.endswith(CODE_SUFFIXES) for f in files):
         inv.gap(f"{tree.label}: no dependency metadata found; bundled or vendored code cannot be scanned "

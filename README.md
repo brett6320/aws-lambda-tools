@@ -149,7 +149,7 @@ There is no restore command yet. The JSON files keep AWS's own response shapes s
 ### scan
 
 ```bash
-lambda-tools scan PATH                       # project directory or deployment zip
+lambda-tools scan PATH                       # project directory, deployment zip, or backup directory
 lambda-tools scan --function NAME [--qualifier Q]
     [--fail-on LEVEL] [--allow-gaps] [--include-dev] [--json] [--report FILE]
 ```
@@ -158,6 +158,10 @@ What it reads:
 
 - **Python:** `*.dist-info/METADATA` (installed packages) and `requirements*.txt` (`==` pins, following `-r` includes).
 - **Node.js:** `package-lock.json` v2/v3 (devDependencies skipped unless `--include-dev`), or `node_modules/**/package.json` when there is no lockfile.
+
+A **backup directory** (written by `lambda-tools backup --execute`) is checked against its manifest checksums, and then its `code.zip` is scanned. Layers aren't stored in backups, so they are reported as coverage gaps.
+
+In any other directory, zip files aren't opened. If a directory holds archives but no dependency manifests, that is a coverage gap rather than a clean result.
 
 With `--function`, the function's code and every layer are downloaded, verified against their sha256, and read in memory. Nothing is extracted or executed.
 
