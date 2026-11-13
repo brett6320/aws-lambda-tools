@@ -258,7 +258,7 @@ lambda-tools package [PATH] [--bump patch|minor|major | --set-version X.Y.Z] [--
 
 1. Copies the source into a temp directory. Default excludes: `.git`, `.venv`, `tests/` and `backups/` at the root, `dist/`, `__pycache__`, `.env*`, `*.pem`, `*.key`, `.npmrc`, `lambda-tools.json`, `CHANGELOG.md`. Symlinks are refused.
 2. Installs dependencies for Lambda's Linux platform:
-   - **Python:** `pip install --target --platform manylinux2014_<arch> --only-binary=:all:`.
+   - **Python:** `pip install --target --platform manylinux2014_<arch> --only-binary=:all:`. Requirements not pinned with `==` resolve to the newest **stable** release; `PIP_PRE=false` overrides any `pre = true` in your pip config. After installing, each unpinned package is checked against its latest stable release on PyPI. A package left on an older version gets a warning with the likely reason: either a version constraint (its own specifier or another package's), or no Linux wheel for the runtime and architecture. Packages PyPI doesn't know, such as ones from a private index, are listed as unchecked.
    - **Node.js:** `npm ci --omit=dev --os=linux --cpu=<arch> --ignore-scripts`. Native modules that aren't Linux binaries fail the build with advice to build in a container.
 3. Scans the result. Findings at or above `--fail-on`, or coverage gaps, block the build unless you explicitly allow them. Allowed findings are recorded in the changelog.
 4. Builds a deterministic zip (sorted entries, fixed timestamps, `0644`/`0755` modes), so the same inputs give the same sha256. It fails over Lambda's 250 MB unzipped limit and warns over 50 MB zipped.

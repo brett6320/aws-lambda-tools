@@ -24,13 +24,17 @@ import zipfile
 from datetime import date
 from pathlib import Path
 
+from packaging.requirements import InvalidRequirement, Requirement
+from packaging.utils import canonicalize_name
+from packaging.version import InvalidVersion, Version
+
 from lambdatools import __version__
-from lambdatools.common import changelog, config, proc, versions
+from lambdatools.common import changelog, config, proc, pypi, versions
 from lambdatools.common.fsutil import atomic_write, create_exclusive, git_info, unified_diff, utc_now_iso
 from lambdatools.common.inventory import DirTree
 from lambdatools.common.log import EXIT_FINDINGS, EXIT_OK, WARNINGS, ToolError, log, mode_prefix
 from lambdatools.common.osv import OsvClient
-from lambdatools.remediate import pip_platform_args
+from lambdatools.remediate import _requirement_files, pip_platform_args
 from lambdatools.scan import ScanResult, policy_from, scan_trees, summary
 
 ZIP_LIMIT = 50 * 1024 * 1024
@@ -96,9 +100,63 @@ def copy_source(src: Path, dest: Path, patterns: list[str]) -> None:
             shutil.copy2(path, dest / rel)
 
 
-def install_python(staging: Path, requirements: Path, runtime: str, arch: str) -> None:
-    proc.run([sys.executable, "-m", "pip", "install", "--quiet", "--disable-pip-version-check", "--no-input",
-              "--no-compile", "--target", str(staging), *pip_platform_args(runtime, arch), "-r", str(requirements)])
+def install_python(staging: Path, requirements: Path, runtime: str, arch: str) -> list[dict]:
+    """Install into staging for the Lambda platform; returns pip's resolved `install` entries."""
+    with tempfile.TemporaryDirectory(prefix="lambda-tools-report-") as tmp:
+        report = Path(tmp) / "report.json"
+        # PIP_PRE=false overrides `pre = true` in pip config: unpinned packages resolve to stable releases only
+        proc.run([sys.executable, "-m", "pip", "install", "--quiet", "--disable-pip-version-check", "--no-input",
+                  "--no-compile", "--report", str(report), "--target", str(staging), *pip_platform_args(runtime, arch),
+                  "-r", str(requirements)], env={"PIP_PRE": "false"})
+        return json.loads(report.read_text()).get("install", [])
+
+
+def pinned_names(root: Path, requirements: str) -> set[str]:
+    """Canonical names pinned with == (no wildcard) in the requirements file and its -r/-c includes."""
+    names = set()
+    for rel in _requirement_files(root, requirements):
+        for line in (root / rel).read_text().splitlines():
+            code = line.partition(" #")[0].strip()
+            if not code or code.startswith(("#", "-")):
+                continue
+            try:
+                req = Requirement(code)
+            except InvalidRequirement:
+                continue
+            specs = list(req.specifier)
+            if len(specs) == 1 and specs[0].operator in ("==", "===") and "*" not in specs[0].version:
+                names.add(canonicalize_name(req.name))
+    return names
+
+
+def check_latest_stable(installed: list[dict], pinned: set[str], runtime: str, arch: str) -> list[str]:
+    """Warn about packages not pinned with == that resolved below their latest stable release."""
+    stale, unchecked, checked = [], [], 0
+    for item in installed:
+        meta = item.get("metadata", {})
+        name, version = meta.get("name", ""), meta.get("version", "")
+        if not name or canonicalize_name(name) in pinned:
+            continue
+        latest = pypi.latest_stable(name)
+        if latest is None:
+            unchecked.append(name)
+            continue
+        checked += 1
+        try:
+            behind = Version(version) < Version(latest[0])
+        except InvalidVersion:
+            unchecked.append(name)
+            continue
+        if behind:
+            reason = ("held back by a version constraint (its own specifier or another package's)" if pypi.has_compatible_wheel(latest[1], runtime, arch)
+                      else f"{latest[0]} has no wheel for {runtime} on {arch}")
+            stale.append(f"{name} {version} (latest stable {latest[0]}: {reason})")
+    for s in stale:
+        WARNINGS.add("package", f"not pinned and not at the latest stable release: {s}")
+    if unchecked:
+        WARNINGS.add("package", f"could not check the latest stable release on PyPI for: {', '.join(sorted(unchecked))}")
+    log.info("Checked %d unpinned package(s) against PyPI: %d below the latest stable release", checked, len(stale))
+    return stale
 
 
 def npm_major() -> int:
@@ -261,9 +319,11 @@ def run(args: argparse.Namespace, sess_factory) -> int:
             patterns.append("/" + out_dir.relative_to(root).as_posix())  # never package earlier artifacts
         copy_source(root, staging, patterns)
         if runtime.startswith("python"):
-            req = root / cfg.get("requirements", "requirements.txt")
+            req_name = cfg.get("requirements", "requirements.txt")
+            req = root / req_name
             if req.exists():
-                install_python(staging, req, runtime, arch)
+                installed = install_python(staging, req, runtime, arch)
+                check_latest_stable(installed, pinned_names(root, req_name), runtime, arch)
         else:
             install_node(root, staging, arch, args.allow_scripts)
 
