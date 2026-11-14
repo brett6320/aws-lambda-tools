@@ -5,8 +5,10 @@
 All commands accept `--profile`, `--region`, `-v` and `-q`, and share the exit codes and output conventions described in the [README](../../README.md#commands).
 
 ```bash
-lambda-tools backup FUNCTION [--qualifier Q] [--out DIR] [--no-iam] [--project DIR] [--execute]
+lambda-tools backup FUNCTION [--qualifier VERSION_OR_ALIAS] [--out DIR] [--no-iam] [--project DIR] [--execute]
 ```
+
+`FUNCTION` is a name (`orders-api-PRD-USE1`), an ARN (`arn:aws:lambda:us-east-1:123456789012:function:orders-api-PRD-USE1`), or a partial ARN (`123456789012:function:orders-api-PRD-USE1`). Give a version or alias with `--qualifier`, not as a `:1` or `:prod` suffix: Lambda accepts the suffix, but the backup would then not record which version it holds. An ARN doesn't choose the region; the run uses `--region`, `AWS_REGION`, or `region` in `lambda-tools.json`, and refuses a function in another region or account.
 
 Writes `<root>/<account>/<region>/<function>/<UTC timestamp>/`. The root is `--out`, `$LAMBDA_TOOLS_BACKUP_DIR`, or `backups/` in the [data directory](../configuration.md#data-directory). `--project` (default: the current directory) points at a directory whose `lambda-tools.json` supplies `account_id` and `region`. The directory is `0700` and its files are `0600`. It is built in a temp directory and renamed into place, and the tool refuses a location inside a git work tree unless git ignores it.
 

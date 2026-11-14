@@ -173,7 +173,8 @@ def render_text(result: ScanResult, out=None) -> None:
 def add_arguments(p: argparse.ArgumentParser) -> None:
     src = p.add_mutually_exclusive_group(required=True)
     src.add_argument("path", nargs="?", type=Path, help="project directory or deployment zip to scan")
-    src.add_argument("--function", help="deployed function name or ARN to scan (downloads code and layers)")
+    src.add_argument("--function", metavar="FUNCTION",
+                     help="deployed function to scan: name, ARN, or partial ARN (downloads code and layers); give a version or alias with --qualifier")
     p.add_argument("--qualifier", help="version or alias, with --function")
     p.add_argument("--project", type=Path, help="directory holding lambda-tools.json (default: PATH, or current directory)")
     p.add_argument("--fail-on", choices=config.FAIL_ON_CHOICES, help="lowest severity that fails (default: low)")

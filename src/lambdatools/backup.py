@@ -239,7 +239,8 @@ def write_backup(dest: Path, files: dict[str, bytes]) -> None:
 
 
 def add_arguments(p: argparse.ArgumentParser) -> None:
-    p.add_argument("function", help="function name or ARN")
+    p.add_argument("function", metavar="FUNCTION",
+                   help="function name, ARN, or partial ARN (ACCOUNT:function:NAME); give a version or alias with --qualifier, not as a :suffix")
     p.add_argument("--qualifier", help="version or alias to back up (default: $LATEST)")
     p.add_argument("--out", type=Path, help="backup root directory (default: $LAMBDA_TOOLS_BACKUP_DIR or the per-user data dir)")
     p.add_argument("--no-iam", action="store_true", help="skip the execution role and its policies")
