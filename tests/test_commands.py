@@ -84,7 +84,8 @@ def test_backup_redacts_when_pass_missing(tmp_path, lambda_env, capsys, monkeypa
     fn = json.loads((dest / "function.json").read_text())
     assert fn["Configuration"]["Environment"]["Variables"] == {"API_KEY": "<redacted>"}
     assert "Location" not in fn["Code"]
-    assert "s3.amazonaws.com" in (dest / "policies.json").read_text()
+    policy = json.loads((dest / "policies.json").read_text())["$LATEST"]["Policy"]
+    assert [s["Principal"]["Service"] for s in policy["Statement"]] == ["s3.amazonaws.com"]
     assert "inline" in (dest / "iam-role.json").read_text()
     assert stat.S_IMODE(dest.stat().st_mode) == 0o700
     assert all(stat.S_IMODE(p.stat().st_mode) == 0o600 for p in dest.iterdir())
@@ -1411,3 +1412,18 @@ def test_scan_fails_on_deprecated_runtime(tmp_path, monkeypatch, capsys):
     report = json.loads(capsys.readouterr().out)
     assert report["runtime"]["status"] == "deprecated" and report["findings"] == []
     assert scan.run(_scan_args(backup_dir, allow_deprecated_runtime=True), None) == 0
+
+
+def test_new_files_respect_umask(tmp_path):
+    from lambdatools.common.fsutil import atomic_write, create_exclusive
+    old = os.umask(0o077)
+    try:
+        atomic_write(tmp_path / "a.txt", "x", backup=False)
+        create_exclusive(tmp_path / "b.zip", b"x")
+    finally:
+        os.umask(old)
+    assert stat.S_IMODE((tmp_path / "a.txt").stat().st_mode) == 0o600
+    assert stat.S_IMODE((tmp_path / "b.zip").stat().st_mode) == 0o600
+    (tmp_path / "a.txt").chmod(0o640)  # an existing file keeps its mode
+    atomic_write(tmp_path / "a.txt", "y", backup=False)
+    assert stat.S_IMODE((tmp_path / "a.txt").stat().st_mode) == 0o640

@@ -67,6 +67,17 @@ def _backup_copy(real: Path) -> Path:
     return dest
 
 
+def _umask() -> int:
+    current = os.umask(0)
+    os.umask(current)
+    return current
+
+
+def new_file_mode(mode: int) -> int:
+    """`mode` as the process umask allows it, as open() would apply it."""
+    return mode & ~_umask()
+
+
 def atomic_write(path: Path, content: str | bytes, *, backup: bool = True, mode: int = 0o644) -> Path | None:
     """Write via temp file + rename in the same directory.
 
@@ -76,6 +87,7 @@ def atomic_write(path: Path, content: str | bytes, *, backup: bool = True, mode:
     real = Path(os.path.realpath(path))
     data = content.encode() if isinstance(content, str) else content
     backup_path = None
+    mode = new_file_mode(mode)
     if real.exists():
         mode = real.stat().st_mode & 0o7777
         if backup:
@@ -105,7 +117,7 @@ def create_exclusive(path: Path, content: bytes, mode: int = 0o644) -> None:
             fh.write(content)
             fh.flush()
             os.fsync(fh.fileno())
-        os.chmod(tmp, mode)
+        os.chmod(tmp, new_file_mode(mode))
         try:
             os.link(tmp, path)
         except FileExistsError:
