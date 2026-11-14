@@ -7,8 +7,10 @@ All commands accept `--profile`, `--region`, `-v` and `-q`, and share the exit c
 ```bash
 lambda-tools scan PATH                       # project directory, deployment zip, or backup directory
 lambda-tools scan --function NAME [--qualifier Q]
-    [--fail-on LEVEL] [--allow-gaps] [--allow-deprecated-runtime] [--include-dev] [--json] [--report FILE]
+    [--project DIR] [--fail-on LEVEL] [--allow-gaps] [--allow-deprecated-runtime] [--include-dev] [--json] [--report FILE]
 ```
+
+`--project` names the directory whose `lambda-tools.json` supplies `fail_on`, `ignore`, `account_id` and `region`. It defaults to `PATH` when that is a directory, otherwise the current directory.
 
 What it reads:
 

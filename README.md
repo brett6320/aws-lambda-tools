@@ -20,9 +20,32 @@ Supports Python (`requirements.txt`) and Node.js (`package-lock.json` v2/v3) fun
 
 Every command that changes something is a **dry-run by default**. It shows what would change; pass `--execute` (or `--apply`) to do it.
 
+## Installation
+
+You need Python 3.11+ and git. Node.js projects also need npm 10+.
+
+`install.sh` installs a pinned commit into user space, never from the working tree. Each commit gets its own virtualenv, and a `current` link is switched only after an install succeeds.
+
+```bash
+./install.sh                    # dry-run: shows what it would do
+./install.sh --execute          # install HEAD
+./install.sh --ref v0.2.0 --execute
+./install.sh --status
+./install.sh --uninstall --execute   # removes only what it installed
+```
+
+The command lands in `~/.local/bin/lambda-tools` (override with `LAMBDA_TOOLS_BIN_DIR`).
+
+For development:
+
+```bash
+python3 -m venv .venv && .venv/bin/pip install -e '.[test]'
+.venv/bin/pytest
+```
+
 ## Quick start
 
-The example function is `orders-api-PRD-USE1`: the `orders-api` service, deployed to production in us-east-1. Every command is a dry-run until you add `--execute`. Read what it would do first, then run it again with the flag.
+The example function is `orders-api-PRD-USE1`: the `orders-api` service, deployed to production in us-east-1. For each command that writes, read the dry-run first, then run it again with `--execute`.
 
 **Already have the function's source?** Skip to [step 3](#3-record-a-smoke-test-baseline). **Starting a brand-new function?** See [Starting fresh](#starting-fresh) below.
 
@@ -140,74 +163,9 @@ Then list your dependencies in `requirements.txt` (or `package.json` plus `packa
 
 [`examples/demo-function`](examples/demo-function) is a **demo-only** Python function with a deliberately vulnerable dependency. Its README walks through scan → remediate → package. Do not deploy it.
 
-## Installation
-
-You need Python 3.11+ and git. Node.js projects also need npm 10+.
-
-`install.sh` installs a pinned commit into user space, never from the working tree. Each commit gets its own virtualenv, and a `current` link is switched only after an install succeeds.
-
-```bash
-./install.sh                    # dry-run: shows what it would do
-./install.sh --execute          # install HEAD
-./install.sh --ref v0.2.0 --execute
-./install.sh --status
-./install.sh --uninstall --execute   # removes only what it installed
-```
-
-The command lands in `~/.local/bin/lambda-tools` (override with `LAMBDA_TOOLS_BIN_DIR`).
-
-For development:
-
-```bash
-python3 -m venv .venv && .venv/bin/pip install -e '.[test]'
-.venv/bin/pytest
-```
-
 ## Configuration
 
-Settings resolve in this order: **CLI flag > environment variable > `lambda-tools.json` > built-in default**. Unknown keys and wrong types are errors that name the key and the file.
-
-`lambda-tools.json` lives in the function's project directory:
-
-```json
-{
-  "name": "orders-api",
-  "function_name": "orders-api-prod",
-  "runtime": "python3.12",
-  "architecture": "arm64",
-  "version": "1.4.2",
-  "requirements": "requirements.txt",
-  "exclude": ["docs", "*.md"],
-  "fail_on": "low",
-  "account_id": "123456789012",
-  "region": "us-east-1",
-  "ignore": [
-    {"id": "GHSA-xxxx-xxxx-xxxx", "reason": "not reachable: we never parse untrusted YAML", "expires": "2027-01-31"}
-  ]
-}
-```
-
-| Key | Used by | Meaning |
-|---|---|---|
-| `name`, `runtime`, `version` | package (required) | Artifact name, Lambda runtime (`python3.x` / `nodejsNN.x`), current released version |
-| `versioning` | package | `semver` (default): `X.Y.Z`, raised with `--bump`. `date`: the build date `YYYY.MM.DD` (UTC, zero-padded), with `.1`, `.2`, … for further builds the same day. See [Versions](docs/commands/package.md#versions) |
-| `architecture` | package, remediate | `x86_64` (default) or `arm64`; selects Linux wheels / npm `--cpu` |
-| `function_name` | package | Used to print the deploy command |
-| `requirements` | package, remediate | Python requirements file (default `requirements.txt`) |
-| `exclude` | package | Extra patterns. `/x` matches only at the project root; a pattern without `/` matches any path segment; anything else matches the whole relative path |
-| `fail_on` | scan, package, remediate | Lowest failing severity: `low` (default), `medium`, `high`, `critical`, `none` |
-| `ignore` | scan, package, remediate | Accepted risks. Each needs an `id` (or alias), `reason`, and `expires`. Expired entries stop applying and produce a warning. Ignored findings are still listed and recorded in the changelog |
-| `account_id` | backup, scan | If set, the function must be in this account |
-| `region` | backup, scan | Region to use when neither `--region` nor `AWS_REGION` is set. When one of them is set, it wins and a warning names both regions |
-
-| Environment variable | Meaning |
-|---|---|
-| `AWS_PROFILE`, `AWS_REGION` | Defaults for `--profile` / `--region` |
-| `LAMBDA_TOOLS_FAIL_ON` | Default for `--fail-on` |
-| `LAMBDA_TOOLS_BACKUP_DIR` | Default backup root |
-| `LAMBDA_TOOLS_OSV_URL` | OSV API base URL (for a mirror) |
-| `PASSWORD_STORE_DIR` | `pass` store location |
-| `SOURCE_DATE_EPOCH` | Timestamp written into zip entries (default 1980-01-01) |
+Settings come from CLI flags, environment variables, and `lambda-tools.json` in the project directory, in that order. See [Configuration](docs/configuration.md) for every key and variable.
 
 ## Commands
 
@@ -253,6 +211,6 @@ Each command has its own reference page:
 
 This suite follows `DESIGN_PRINCIPLES.md`. Deliberate departures from the usual one-directory-per-tool AWS tool layout:
 
-- differs: one package and one `lambda-tools` command with subcommands, so all four commands share inventory, OSV, severity, and policy code. That shared code is what keeps remediation consistent.
+- differs: one package and one `lambda-tools` command with subcommands, so all six commands share inventory, OSV, severity, and policy code. That shared code is what keeps remediation consistent.
 - differs: no `.env` loading (`python-dotenv`). Configuration comes only from flags, environment variables, and `lambda-tools.json`.
 - differs: `scan` and `remediate` are not AWS-mutating, so `scan` has no `--execute` flag. `backup` keeps one because it writes files and `pass` entries.

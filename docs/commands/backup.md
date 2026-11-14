@@ -5,10 +5,10 @@
 All commands accept `--profile`, `--region`, `-v` and `-q`, and share the exit codes and output conventions described in the [README](../../README.md#commands).
 
 ```bash
-lambda-tools backup FUNCTION [--qualifier Q] [--out DIR] [--no-iam] [--execute]
+lambda-tools backup FUNCTION [--qualifier Q] [--out DIR] [--no-iam] [--project DIR] [--execute]
 ```
 
-Writes `<root>/<account>/<region>/<function>/<UTC timestamp>/`. The root is `--out`, `$LAMBDA_TOOLS_BACKUP_DIR`, or `~/.local/share/lambda-tools/backups`. The directory is `0700` and its files are `0600`. It is built in a temp directory and renamed into place, and the tool refuses a location inside a git work tree unless git ignores it.
+Writes `<root>/<account>/<region>/<function>/<UTC timestamp>/`. The root is `--out`, `$LAMBDA_TOOLS_BACKUP_DIR`, or `backups/` in the [data directory](../configuration.md#data-directory). `--project` (default: the current directory) points at a directory whose `lambda-tools.json` supplies `account_id` and `region`. The directory is `0700` and its files are `0600`. It is built in a temp directory and renamed into place, and the tool refuses a location inside a git work tree unless git ignores it.
 
 | File | Contents |
 |---|---|
