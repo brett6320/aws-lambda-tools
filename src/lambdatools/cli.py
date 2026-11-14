@@ -23,6 +23,8 @@ COMMANDS = {
     "scan": ("lambdatools.scan", "check dependencies for known vulnerabilities (OSV.dev)"),
     "remediate": ("lambdatools.remediate", "upgrade vulnerable dependencies to fixed versions"),
     "package": ("lambdatools.package", "build a versioned deployment zip and update the changelog"),
+    "import": ("lambdatools.importer", "turn a backup into a project directory for remediate and package"),
+    "test": ("lambdatools.smoke", "run a Python function's smoke tests before and after changes"),
 }
 
 
@@ -53,10 +55,9 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
     logmod.setup(verbose=args.verbose, quiet=args.quiet)
 
-    def sess_factory():
+    def sess_factory(cfg=None):
         from lambdatools.common import aws
-        return aws.session(args.profile or os.environ.get("AWS_PROFILE"),
-                           args.region or os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION"))
+        return aws.session(args.profile or os.environ.get("AWS_PROFILE"), aws.resolve_region(args.region, cfg))
 
     code = EXIT_ERROR
     try:

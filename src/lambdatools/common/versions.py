@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from datetime import date
 from functools import total_ordering
 
 from packaging.version import InvalidVersion, Version
@@ -68,3 +69,35 @@ def bump(version: str, part: str) -> str:
 
 def release_greater(new: str, old: str) -> bool:
     return SemVer(new) > SemVer(old)
+
+
+# Date versions: YYYY.MM.DD, plus .N for the Nth extra build on the same day.
+DATE_RE = re.compile(r"^(20\d{2})\.(\d{2})\.(\d{2})(?:\.([1-9]\d*))?$")
+
+
+def is_date_version(version: str) -> bool:
+    m = DATE_RE.match(version)
+    if not m:
+        return False
+    try:
+        date(int(m[1]), int(m[2]), int(m[3]))
+    except ValueError:
+        return False
+    return True
+
+
+def numeric_key(version: str) -> tuple[int, ...]:
+    """Order X.Y.Z and YYYY.MM.DD[.N] numerically, so moving from SemVer to dates sorts forward."""
+    parts = [int(p) for p in version.split(".")]
+    return tuple(parts + [0] * (4 - len(parts)))
+
+
+def next_date_version(current: str, today: date) -> str:
+    """Today's date as YYYY.MM.DD, or YYYY.MM.DD.N when current is already from today."""
+    base = today.strftime("%Y.%m.%d")
+    if is_date_version(current) and current.split(".")[:3] == base.split("."):
+        counter = int(current.split(".")[3]) if current.count(".") == 3 else 0
+        return f"{base}.{counter + 1}"
+    if numeric_key(current) >= numeric_key(base):
+        raise ValueError(f"the current version {current} is not earlier than today's date {base} (UTC)")
+    return base

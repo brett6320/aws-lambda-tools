@@ -151,16 +151,20 @@ class ZipTree(Tree):
         total = 0
         self._infos: dict[str, zipfile.ZipInfo] = {}
         self.skipped: list[str] = []
+        self.links: list[str] = []
         for info in self._zip.infolist():
             total += info.file_size
             if total > max_total:
                 raise ToolError(f"{label}: uncompressed size exceeds {max_total} bytes; refusing to read")
             name = info.filename
             mode = info.external_attr >> 16
-            if info.is_dir() or stat.S_ISLNK(mode):
+            if info.is_dir():
+                continue
+            if stat.S_ISLNK(mode):
+                self.links.append(name)
                 continue
             norm = posixpath.normpath(name)
-            if name.startswith("/") or norm.startswith("..") or "\\" in name:
+            if name.startswith("/") or norm.startswith("..") or norm in (".", "") or "\\" in name:
                 self.skipped.append(name)
                 continue
             self._infos[norm] = info
@@ -168,12 +172,16 @@ class ZipTree(Tree):
     def files(self) -> list[str]:
         return sorted(self._infos)
 
-    def read(self, name: str) -> bytes:
+    def read(self, name: str, limit: int = MAX_MEMBER_BYTES) -> bytes:
         info = self._infos[name]
-        if info.file_size > MAX_MEMBER_BYTES:
-            raise ToolError(f"{self.label}:{name} is larger than {MAX_MEMBER_BYTES} bytes")
+        if info.file_size > limit:
+            raise ToolError(f"{self.label}:{name} is larger than {limit} bytes")
         with self._zip.open(info) as fh:
-            return fh.read(MAX_MEMBER_BYTES + 1)[:MAX_MEMBER_BYTES]
+            return fh.read(limit + 1)[:limit]
+
+    def mode(self, name: str) -> int:
+        """Permission bits recorded in the zip (0 when it recorded none)."""
+        return (self._infos[name].external_attr >> 16) & 0o777
 
 
 def open_path(path: Path) -> Tree:
@@ -381,6 +389,11 @@ def build_inventory(tree: Tree, include_dev: bool = False, installed: bool | Non
         elif base in ("pyproject.toml", "setup.py", "setup.cfg") and posixpath.dirname(name) == "":
             if not any(_is_requirements_file(f) for f in files) and not installed_py:
                 inv.gap(f"{tree.label}:{name}: {base} without requirements.txt is not supported")
+    # Archives in a directory are not opened; with nothing else found that must not read as clean.
+    archives = [f for f in files if f.endswith(".zip") and "node_modules/" not in f]
+    if isinstance(tree, DirTree) and not inv.dependencies and archives:
+        inv.gap(f"{tree.label}: no dependency manifests found, and archives are not opened "
+                f"({', '.join(archives[:3])}); scan an archive directly with `lambda-tools scan FILE.zip`")
     # A deployed zip with code but no metadata may be a bundle or vendored code.
     if isinstance(tree, ZipTree) and not inv.dependencies and any(f.endswith(CODE_SUFFIXES) for f in files):
         inv.gap(f"{tree.label}: no dependency metadata found; bundled or vendored code cannot be scanned "

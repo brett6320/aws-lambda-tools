@@ -40,6 +40,8 @@ class Plan:
     bumps: list[tuple[str, str, str, str, list[str]]] = field(default_factory=list)  # eco, name, old, new, ids
     remaining: list[Finding] = field(default_factory=list)
     manual: list[str] = field(default_factory=list)
+    # vulnerable packages scan finds in files remediate doesn't edit: "eco:name version in path (ids)"
+    unmanaged: list[str] = field(default_factory=list)
 
 
 def runtime_info(cfg: config.ProjectConfig, root: Path) -> tuple[str, str]:
@@ -251,6 +253,36 @@ def _group(findings: list[Finding]) -> dict[tuple[str, str], list[Finding]]:
     return groups
 
 
+def managed_files(kind: str, root: Path, cfg: config.ProjectConfig) -> set[str]:
+    if kind == "node":
+        return {"package-lock.json"}
+    return set(_requirement_files(root, cfg.get("requirements", "requirements.txt")))
+
+
+def unmanaged_findings(root: Path, managed: set[str], client: OsvClient, policy: Policy) -> list[str]:
+    """Failing findings that `scan` reports from files remediate doesn't edit.
+
+    Examples: packages installed or vendored into the project (*.dist-info,
+    node_modules without a lockfile entry) and requirement files that the main
+    one doesn't include. Without this, remediate would report nothing to do
+    while scan still fails.
+    """
+    tree = DirTree(root)
+    findings, _ = evaluate(build_inventory(tree).sorted(), client, policy)
+    prefix = f"{tree.label}:"
+    grouped: dict[tuple[str, str, str, str], set[str]] = {}
+    for f in findings:
+        if not policy.fails(f):
+            continue
+        for source in f.dependency.sources:
+            rel = source.removeprefix(prefix)
+            if rel not in managed:
+                dep = f.dependency
+                grouped.setdefault((dep.ecosystem, dep.name, dep.version, rel), set()).add(f.vuln_id)
+    return [f"{eco}:{name} {version} in {rel} ({', '.join(sorted(ids))})"
+            for (eco, name, version, rel), ids in sorted(grouped.items())]
+
+
 # --- Command --------------------------------------------------------------------
 
 def merged_bumps(plan: Plan) -> list[tuple[str, str, str, str, list[str]]]:
@@ -285,6 +317,7 @@ def run(args: argparse.Namespace, sess_factory) -> int:
     arch = cfg.get("architecture", "x86_64")
     log.info("Planning %s remediation for %s", kind, root)
     plan = plan_node(root, client, policy) if kind == "node" else plan_python(root, cfg, client, policy, runtime, arch)
+    plan.unmanaged = unmanaged_findings(root, managed_files(kind, root, cfg), client, policy)
 
     prefix = mode_prefix(args.execute)
     for rel, (old, new) in plan.edits.items():
@@ -296,6 +329,10 @@ def run(args: argparse.Namespace, sess_factory) -> int:
         log.info("%s %s:%s %s -> %s (%s)", prefix, eco, name, old, new, ", ".join(ids))
     for m in plan.manual:
         WARNINGS.add("remediate", f"needs a manual change: {m}")
+    for u in plan.unmanaged:
+        WARNINGS.add("remediate", f"not managed by remediate: {u}. It is installed or vendored in the project, or "
+                                  "listed in a requirements file the main one doesn't include; update or remove "
+                                  "it by hand")
     for f in plan.remaining:
         WARNINGS.add("remediate", f"still open after remediation: {f.dependency.ecosystem}:{f.dependency.name} "
                                   f"{f.dependency.version} {f.vuln_id} ({f.severity}; fix: {f.fixed or 'none available'})")
@@ -311,9 +348,12 @@ def run(args: argparse.Namespace, sess_factory) -> int:
         log.info("[EXECUTE] Recorded %d change(s) in CHANGELOG.md [Unreleased]", len(merged_bumps(plan)))
     elif plan.edits:
         log.info("Dry-run: nothing written. Pass --execute to apply these changes.")
+    elif plan.unmanaged:
+        log.info("No changes remediate can make, but %d vulnerable package(s) are outside the files it manages "
+                 "(see warnings).", len(plan.unmanaged))
     else:
         log.info("No changes to make.")
 
     sys.stdout.write(f"\nRemediation summary: {len(merged_bumps(plan))} upgrade(s), {len(plan.remaining)} still open, "
-                     f"{len(plan.manual)} need manual changes\n")
-    return EXIT_FINDINGS if plan.remaining or plan.manual else EXIT_OK
+                     f"{len(plan.manual)} need manual changes, {len(plan.unmanaged)} outside managed files\n")
+    return EXIT_FINDINGS if plan.remaining or plan.manual or plan.unmanaged else EXIT_OK

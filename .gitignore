@@ -6,6 +6,7 @@ build/
 dist/
 *.egg-info/
 backups/
+/pkg/
 reports/
 .env
 .env.*

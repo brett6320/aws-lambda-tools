@@ -19,7 +19,7 @@ from typing import Any, Callable
 from botocore.exceptions import ClientError
 
 from lambdatools import __version__
-from lambdatools.common import aws, config, secretstore
+from lambdatools.common import aws, config, runtimes, secretstore
 from lambdatools.common.fsutil import data_dir, ensure_private_dir, refuse_if_tracked_location, utc_now_iso, utc_stamp
 from lambdatools.common.log import EXIT_FINDINGS, EXIT_OK, WARNINGS, ToolError, log, mode_prefix
 
@@ -249,7 +249,7 @@ def add_arguments(p: argparse.ArgumentParser) -> None:
 
 def run(args: argparse.Namespace, sess_factory) -> int:
     cfg = config.load_project(args.project)
-    sess = sess_factory()
+    sess = sess_factory(cfg)
     lam, iam = aws.client(sess, "lambda"), aws.client(sess, "iam")
     caller = aws.caller_account(sess)
     try:
@@ -257,13 +257,14 @@ def run(args: argparse.Namespace, sess_factory) -> int:
                                                    **({"Qualifier": args.qualifier} if args.qualifier else {}))
     except ClientError as e:
         raise ToolError(f"get_function_configuration {args.function}: {aws.error_code(e)}") from None
-    aws.check_function_scope(preflight["FunctionArn"], caller, cfg.get("account_id"), cfg.get("region"))
+    aws.check_function_scope(preflight["FunctionArn"], caller, cfg.get("account_id"), sess.region_name)
     del preflight  # holds environment values; the redacted copy comes from collect()
 
     files, code_info, missing = collect(lam, iam, args.function, args.qualifier, include_iam=not args.no_iam)
     conf = files["function.json"]["Configuration"]
     arn, name = conf["FunctionArn"], conf["FunctionName"]
     account, region = arn.split(":")[4], arn.split(":")[3]
+    runtimes.report(conf.get("Runtime"), "backup")  # container-image functions have none
 
     values: dict[str, dict] = {}
     contexts, env_errors = extract_environment(files, values)

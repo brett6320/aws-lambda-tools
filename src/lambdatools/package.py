@@ -21,29 +21,36 @@ import sys
 import tempfile
 import time
 import zipfile
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
 
+from packaging.requirements import InvalidRequirement, Requirement
+from packaging.utils import canonicalize_name
+from packaging.version import InvalidVersion, Version
+
 from lambdatools import __version__
-from lambdatools.common import changelog, config, proc, versions
+from lambdatools.common import changelog, config, proc, pypi, runtimes, versions
 from lambdatools.common.fsutil import atomic_write, create_exclusive, git_info, unified_diff, utc_now_iso
 from lambdatools.common.inventory import DirTree
 from lambdatools.common.log import EXIT_FINDINGS, EXIT_OK, WARNINGS, ToolError, log, mode_prefix
 from lambdatools.common.osv import OsvClient
-from lambdatools.remediate import pip_platform_args
+from lambdatools.remediate import _requirement_files, pip_platform_args
 from lambdatools.scan import ScanResult, policy_from, scan_trees, summary
 
 ZIP_LIMIT = 50 * 1024 * 1024
 UNZIPPED_LIMIT = 250 * 1024 * 1024
 # "/x" matches x at the project root only; a pattern without "/" matches any
 # path segment; any other pattern is matched against the whole relative path.
+# credentials and local state that must never ship
+SECRET_EXCLUDES = [
+    ".env", ".env.*", ".envrc", ".npmrc", ".pypirc", ".netrc", ".git-credentials", ".aws", ".ssh",
+    "*.pem", "*.key", "*.p12", "*.pfx", "id_rsa*", "id_ed25519*", "*.tfstate", "*.tfstate.*",
+]
 DEFAULT_EXCLUDES = [
     "/.venv", "/venv", "/dist", "/.lambda-tools", "/node_modules", "/tests", "/.pytest_cache", "/backups",
     "/lambda-tools.json", "/CHANGELOG.md", "/.gitignore",
     ".git", "__pycache__", "*.pyc", ".DS_Store",
-    # credentials and local state that must never ship
-    ".env", ".env.*", ".envrc", ".npmrc", ".pypirc", ".netrc", ".git-credentials", ".aws", ".ssh",
-    "*.pem", "*.key", "*.p12", "*.pfx", "id_rsa*", "id_ed25519*", "*.tfstate", "*.tfstate.*",
+    *SECRET_EXCLUDES,
 ]
 FIXED_TIME = (1980, 1, 1, 0, 0, 0)
 
@@ -93,9 +100,63 @@ def copy_source(src: Path, dest: Path, patterns: list[str]) -> None:
             shutil.copy2(path, dest / rel)
 
 
-def install_python(staging: Path, requirements: Path, runtime: str, arch: str) -> None:
-    proc.run([sys.executable, "-m", "pip", "install", "--quiet", "--disable-pip-version-check", "--no-input",
-              "--no-compile", "--target", str(staging), *pip_platform_args(runtime, arch), "-r", str(requirements)])
+def install_python(staging: Path, requirements: Path, runtime: str, arch: str) -> list[dict]:
+    """Install into staging for the Lambda platform; returns pip's resolved `install` entries."""
+    with tempfile.TemporaryDirectory(prefix="lambda-tools-report-") as tmp:
+        report = Path(tmp) / "report.json"
+        # PIP_PRE=false overrides `pre = true` in pip config: unpinned packages resolve to stable releases only
+        proc.run([sys.executable, "-m", "pip", "install", "--quiet", "--disable-pip-version-check", "--no-input",
+                  "--no-compile", "--report", str(report), "--target", str(staging), *pip_platform_args(runtime, arch),
+                  "-r", str(requirements)], env={"PIP_PRE": "false"})
+        return json.loads(report.read_text()).get("install", [])
+
+
+def pinned_names(root: Path, requirements: str) -> set[str]:
+    """Canonical names pinned with == (no wildcard) in the requirements file and its -r/-c includes."""
+    names = set()
+    for rel in _requirement_files(root, requirements):
+        for line in (root / rel).read_text().splitlines():
+            code = line.partition(" #")[0].strip()
+            if not code or code.startswith(("#", "-")):
+                continue
+            try:
+                req = Requirement(code)
+            except InvalidRequirement:
+                continue
+            specs = list(req.specifier)
+            if len(specs) == 1 and specs[0].operator in ("==", "===") and "*" not in specs[0].version:
+                names.add(canonicalize_name(req.name))
+    return names
+
+
+def check_latest_stable(installed: list[dict], pinned: set[str], runtime: str, arch: str) -> list[str]:
+    """Warn about packages not pinned with == that resolved below their latest stable release."""
+    stale, unchecked, checked = [], [], 0
+    for item in installed:
+        meta = item.get("metadata", {})
+        name, version = meta.get("name", ""), meta.get("version", "")
+        if not name or canonicalize_name(name) in pinned:
+            continue
+        latest = pypi.latest_stable(name)
+        if latest is None:
+            unchecked.append(name)
+            continue
+        checked += 1
+        try:
+            behind = Version(version) < Version(latest[0])
+        except InvalidVersion:
+            unchecked.append(name)
+            continue
+        if behind:
+            reason = ("held back by a version constraint (its own specifier or another package's)" if pypi.has_compatible_wheel(latest[1], runtime, arch)
+                      else f"{latest[0]} has no wheel for {runtime} on {arch}")
+            stale.append(f"{name} {version} (latest stable {latest[0]}: {reason})")
+    for s in stale:
+        WARNINGS.add("package", f"not pinned and not at the latest stable release: {s}")
+    if unchecked:
+        WARNINGS.add("package", f"could not check the latest stable release on PyPI for: {', '.join(sorted(unchecked))}")
+    log.info("Checked %d unpinned package(s) against PyPI: %d below the latest stable release", checked, len(stale))
+    return stale
 
 
 def npm_major() -> int:
@@ -193,27 +254,53 @@ def release_sections(prev: dict, deps: dict[str, str], result: ScanResult, artif
     return sections
 
 
-def next_version(current: str, bump: str | None, set_version: str | None) -> str:
+def next_version(current: str, bump: str | None, set_version: str | None,
+                 scheme: str = "semver", today: date | None = None) -> str:
+    if scheme == "date":
+        if bump:
+            raise ToolError("--bump doesn't apply with \"versioning\": \"date\"; the version is the build date "
+                            "(use --set-version to choose one)")
+        if set_version:
+            if not versions.is_date_version(set_version):
+                raise ToolError(f"--set-version {set_version!r} must be a date YYYY.MM.DD or YYYY.MM.DD.N")
+            if versions.numeric_key(set_version) <= versions.numeric_key(current):
+                raise ToolError(f"--set-version {set_version} must be later than the current version {current}")
+            return set_version
+        try:
+            return versions.next_date_version(current, today or build_day())
+        except ValueError as e:
+            raise ToolError(f"{e}; pass --set-version to choose a later version") from None
+    if bump is None and versions.is_date_version(current):
+        raise ToolError(f"version {current} looks like a date; add \"versioning\": \"date\" to lambda-tools.json, "
+                        "or pass --bump to treat it as X.Y.Z")
     if set_version:
         if not config.SEMVER_RE.match(set_version):
             raise ToolError(f"--set-version {set_version!r} must be X.Y.Z")
-        if not versions.release_greater(set_version, current):
+        if versions.numeric_key(set_version) <= versions.numeric_key(current):
             raise ToolError(f"--set-version {set_version} must be greater than the current version {current}")
         return set_version
     return versions.bump(current, bump or "patch")
 
 
+def build_day() -> date:
+    """The build date (UTC), used for the changelog and for date versions."""
+    return datetime.now(timezone.utc).date()
+
+
 def add_arguments(p: argparse.ArgumentParser) -> None:
     p.add_argument("path", type=Path, nargs="?", default=Path.cwd(), help="project directory (default: current directory)")
     v = p.add_mutually_exclusive_group()
-    v.add_argument("--bump", choices=("patch", "minor", "major"), help="version part to increment (default: patch)")
-    v.add_argument("--set-version", help="explicit new version X.Y.Z (must be greater than the current one)")
+    v.add_argument("--bump", choices=("patch", "minor", "major"),
+                   help="version part to increment (default: patch; not used with date versioning)")
+    v.add_argument("--set-version", help="explicit new version, X.Y.Z or YYYY.MM.DD[.N] (must be greater than the current one)")
     p.add_argument("--runtime", help="override the runtime from lambda-tools.json")
     p.add_argument("--arch", choices=("x86_64", "arm64"), help="override the architecture from lambda-tools.json")
     p.add_argument("--out", type=Path, help="artifact directory (default: PATH/dist)")
     p.add_argument("--fail-on", choices=config.FAIL_ON_CHOICES, help="lowest severity that blocks the build (default: low)")
     p.add_argument("--allow-vulnerable", action="store_true", help="build even if findings meet --fail-on (recorded in the changelog)")
     p.add_argument("--allow-gaps", action="store_true", help="build even if some dependencies could not be scanned")
+    p.add_argument("--allow-deprecated-runtime", action="store_true",
+                   help="build even though the runtime is deprecated (recorded in the changelog)")
     p.add_argument("--allow-scripts", action="store_true", help="run npm install scripts (off by default)")
     p.add_argument("--execute", "--apply", dest="execute", action="store_true", help="write artifact and records (default: dry-run)")
 
@@ -228,13 +315,19 @@ def run(args: argparse.Namespace, sess_factory) -> int:
     runtime = config.resolve(args.runtime, None, cfg, "runtime", None)
     if not config.RUNTIME_RE.match(runtime):
         raise ToolError(f"runtime {runtime!r} is not a supported Lambda runtime")
+    runtime_status = runtimes.report(runtime, "package")
+    if runtime_status.level == "deprecated" and not args.allow_deprecated_runtime:
+        newer = f"\"runtime\": \"{runtime_status.newest}\"" if runtime_status.newest else "a supported runtime"
+        raise ToolError(f"{runtime_status.message}. Refusing to build for a deprecated runtime: set {newer} in "
+                        f"{config.CONFIG_NAME} (and on the function when you deploy), or pass "
+                        "--allow-deprecated-runtime")
     arch = config.resolve(args.arch, None, cfg, "architecture", "x86_64")
     current = cfg.get("version")
     state = config.load_state(root)
     if state.get("version") and state["version"] != current:
         raise ToolError(f"lambda-tools.json version {current} disagrees with {config.state_path(root)} "
                         f"({state['version']}); fix one of them by hand")
-    version = next_version(current, args.bump, args.set_version)
+    version = next_version(current, args.bump, args.set_version, cfg.get("versioning", "semver"))
     out_dir = (args.out or root / "dist").resolve()
     artifact_name = f"{name}-{version}.zip"
     artifact, manifest_path = out_dir / artifact_name, out_dir / f"{name}-{version}.manifest.json"
@@ -258,9 +351,11 @@ def run(args: argparse.Namespace, sess_factory) -> int:
             patterns.append("/" + out_dir.relative_to(root).as_posix())  # never package earlier artifacts
         copy_source(root, staging, patterns)
         if runtime.startswith("python"):
-            req = root / cfg.get("requirements", "requirements.txt")
+            req_name = cfg.get("requirements", "requirements.txt")
+            req = root / req_name
             if req.exists():
-                install_python(staging, req, runtime, arch)
+                installed = install_python(staging, req, runtime, arch)
+                check_latest_stable(installed, pinned_names(root, req_name), runtime, arch)
         else:
             install_node(root, staging, arch, args.allow_scripts)
 
@@ -288,7 +383,9 @@ def run(args: argparse.Namespace, sess_factory) -> int:
     sha256 = hashlib.sha256(data).hexdigest()
     deps = dependency_map(result)
     sections = release_sections(state, deps, result, artifact_name, sha256)
-    today = date.today().isoformat()
+    if runtime_status.level == "deprecated":
+        sections["Security"].append(f"Built for deprecated runtime {runtime} (--allow-deprecated-runtime)")
+    today = build_day().isoformat()
     new_log = changelog.release(old_log, version, today, sections)
     manifest = {
         "name": name, "version": version, "built_at": utc_now_iso(), "tool_version": __version__,
@@ -321,5 +418,7 @@ def run(args: argparse.Namespace, sess_factory) -> int:
                      f"sha256 {sha256}\n")
     if args.execute and cfg.get("function_name"):
         sys.stdout.write(f"Deploy: aws lambda update-function-code --function-name {cfg.get('function_name')} "
-                         f"--zip-file fileb://{artifact} --publish\n")
+                         f"--zip-file fileb://{artifact} --publish\n"
+                         f"Runtime: if the function isn't on {runtime} yet, also run aws lambda "
+                         f"update-function-configuration --function-name {cfg.get('function_name')} --runtime {runtime}\n")
     return EXIT_OK
