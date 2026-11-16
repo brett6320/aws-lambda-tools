@@ -128,6 +128,67 @@ def test_scope_check_rejects_other_account():
         aws.check_function_scope("arn:aws:lambda:us-east-1:111111111111:function:x", "222222222222", None, None)
 
 
+@pytest.mark.parametrize("function, qualifier, expected", [
+    ("fn", None, ("fn", None)),
+    ("fn", "live", ("fn", "live")),
+    ("fn:live", None, ("fn", "live")),
+    ("fn:1", None, ("fn", "1")),
+    ("123456789012:function:fn", None, ("123456789012:function:fn", None)),
+    ("123456789012:function:fn:live", None, ("123456789012:function:fn", "live")),
+    ("arn:aws:lambda:us-east-1:123456789012:function:fn", "1",
+     ("arn:aws:lambda:us-east-1:123456789012:function:fn", "1")),
+    ("arn:aws:lambda:us-east-1:123456789012:function:fn:$LATEST", None,
+     ("arn:aws:lambda:us-east-1:123456789012:function:fn", "$LATEST")),
+    ("arn:aws-cn:lambda:cn-north-1:123456789012:function:fn:2", None,
+     ("arn:aws-cn:lambda:cn-north-1:123456789012:function:fn", "2")),
+    ("us-east-1:123456789012:function:fn:live", None, ("us-east-1:123456789012:function:fn", "live")),
+    ("function:fn", None, ("function:fn", None)),
+    ("123456789012:fn", None, ("123456789012:fn", None)),
+    ("arn:live", None, ("arn", "live")),
+    ("fn:", "1", ("fn:", "1")),  # malformed: left for Lambda to reject
+])
+def test_split_qualifier(function, qualifier, expected):
+    assert aws.split_qualifier(function, qualifier) == expected
+
+
+def test_split_qualifier_refuses_two_qualifiers():
+    with pytest.raises(ToolError, match="already names version or alias live"):
+        aws.split_qualifier("fn:live", "1")
+
+
+def test_backup_records_suffix_qualifier(tmp_path, lambda_env, capsys, monkeypatch):
+    monkeypatch.setenv("PATH", str(tmp_path / "empty-bin"))
+    args = _backup_args(tmp_path, execute=True)
+    args.function = "fn:live"
+    backup.run(args, lambda *_: lambda_env)
+    dest = Path(json.loads(capsys.readouterr().out)["backup"])
+    assert json.loads((dest / "manifest.json").read_text())["qualifier"] == "live"
+    assert json.loads((dest / "function.json").read_text())["Configuration"]["Version"] == "1"
+
+
+def test_backup_refuses_two_qualifiers_before_aws(tmp_path):
+    args = _backup_args(tmp_path, execute=False)
+    args.function, args.qualifier = "fn:live", "1"
+
+    def no_session(_cfg):
+        raise AssertionError("opened an AWS session")
+    with pytest.raises(ToolError, match="already names version or alias live"):
+        backup.run(args, no_session)
+
+
+def test_scan_function_splits_suffix_qualifier(tmp_path, monkeypatch):
+    from lambdatools import scan
+    seen = []
+
+    def fake_trees(sess, function, qualifier, cfg):
+        seen.append((function, qualifier))
+        raise ToolError("stop")
+    monkeypatch.setattr(scan, "function_trees", fake_trees)
+    with pytest.raises(ToolError, match="stop"):
+        scan.run(_scan_args(None, function="fn:live", project=tmp_path), lambda _cfg: None)
+    assert seen == [("fn", "live")]
+
+
 def test_download_verified_checks_sha(monkeypatch):
     monkeypatch.setattr(urllib.request, "urlopen", lambda req, timeout: io.BytesIO(b"payload"))
     with pytest.raises(ToolError, match="checksum mismatch"):

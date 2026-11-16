@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import os
+import re
 import urllib.request
 
 import boto3
@@ -13,6 +14,10 @@ from botocore.exceptions import ClientError
 
 from lambdatools import __version__
 from lambdatools.common.log import WARNINGS, ToolError, log
+
+# Lambda's FunctionName pattern, with the optional version or alias suffix split out
+FUNCTION_NAME = re.compile(r"(?P<function>(arn:(aws[a-zA-Z-]*)?:lambda:)?([a-z]{2}(-gov)?-[a-z]+-\d:)?(\d{12}:)?"
+                           r"(function:)?[a-zA-Z0-9_.-]+)(:(?P<qualifier>\$LATEST|[a-zA-Z0-9_-]+))?")
 
 MAX_DOWNLOAD_BYTES = 300 * 1024 * 1024
 NOT_FOUND = {"ResourceNotFoundException", "NoSuchEntity", "NotFoundException"}
@@ -50,6 +55,23 @@ def caller_account(sess: boto3.Session) -> str:
         return client(sess, "sts").get_caller_identity()["Account"]
     except ClientError as e:
         raise ToolError(f"cannot verify AWS identity ({error_code(e)}); check credentials") from None
+
+
+def split_qualifier(function: str, qualifier: str | None) -> tuple[str, str | None]:
+    """Move a version or alias suffix (NAME:1, ARN:prod, ACCOUNT:function:NAME:prod) into the qualifier.
+
+    Lambda accepts the suffix itself, but then nothing records which version was used.
+    """
+    m = FUNCTION_NAME.fullmatch(function)
+    if not m or not m["qualifier"]:
+        return function, qualifier  # Lambda rejects anything that does not match its own pattern
+    if qualifier is not None:
+        raise ToolError(f"{function} already names version or alias {m['qualifier']}; drop it or --qualifier {qualifier}")
+    return m["function"], m["qualifier"]
+
+
+def describe(function: str, qualifier: str | None) -> str:
+    return f"{function}:{qualifier}" if qualifier else function
 
 
 def check_function_scope(function_arn: str, caller: str, expected_account: str | None, session_region: str | None) -> None:
