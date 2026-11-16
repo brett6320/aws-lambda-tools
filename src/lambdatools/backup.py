@@ -111,7 +111,7 @@ def collect(lam, iam, function: str, qualifier: str | None, include_iam: bool) -
     try:
         fn = lam.get_function(**params)
     except ClientError as e:
-        raise ToolError(f"get_function {function}: {aws.error_code(e)}") from None
+        raise ToolError(f"get_function {aws.describe(function, qualifier)}: {aws.error_code(e)}") from None
     fn = _drop_metadata(fn)
     code_info = dict(fn.get("Code", {}))
     aws.strip_presigned(fn)
@@ -240,7 +240,7 @@ def write_backup(dest: Path, files: dict[str, bytes]) -> None:
 
 def add_arguments(p: argparse.ArgumentParser) -> None:
     p.add_argument("function", metavar="FUNCTION",
-                   help="function name, ARN, or partial ARN (ACCOUNT:function:NAME); give a version or alias with --qualifier, not as a :suffix")
+                   help="function name, ARN, or partial ARN (ACCOUNT:function:NAME), optionally ending in :VERSION_OR_ALIAS")
     p.add_argument("--qualifier", help="version or alias to back up (default: $LATEST)")
     p.add_argument("--out", type=Path, help="backup root directory (default: $LAMBDA_TOOLS_BACKUP_DIR or the per-user data dir)")
     p.add_argument("--no-iam", action="store_true", help="skip the execution role and its policies")
@@ -249,6 +249,7 @@ def add_arguments(p: argparse.ArgumentParser) -> None:
 
 
 def run(args: argparse.Namespace, sess_factory) -> int:
+    args.function, args.qualifier = aws.split_qualifier(args.function, args.qualifier)
     cfg = config.load_project(args.project)
     sess = sess_factory(cfg)
     lam, iam = aws.client(sess, "lambda"), aws.client(sess, "iam")
@@ -257,7 +258,7 @@ def run(args: argparse.Namespace, sess_factory) -> int:
         preflight = lam.get_function_configuration(FunctionName=args.function,
                                                    **({"Qualifier": args.qualifier} if args.qualifier else {}))
     except ClientError as e:
-        raise ToolError(f"get_function_configuration {args.function}: {aws.error_code(e)}") from None
+        raise ToolError(f"get_function_configuration {aws.describe(args.function, args.qualifier)}: {aws.error_code(e)}") from None
     aws.check_function_scope(preflight["FunctionArn"], caller, cfg.get("account_id"), sess.region_name)
     del preflight  # holds environment values; the redacted copy comes from collect()
 

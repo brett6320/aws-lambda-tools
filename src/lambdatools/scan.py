@@ -102,7 +102,7 @@ def function_trees(sess, function: str, qualifier: str | None,
     try:
         fn = lam.get_function(**params)
     except ClientError as e:
-        raise ToolError(f"get_function {function}: {aws.error_code(e)}") from None
+        raise ToolError(f"get_function {aws.describe(function, qualifier)}: {aws.error_code(e)}") from None
     conf = fn["Configuration"]
     aws.check_function_scope(conf["FunctionArn"], aws.caller_account(sess),
                              cfg.get("account_id") if cfg else None, sess.region_name)
@@ -174,7 +174,7 @@ def add_arguments(p: argparse.ArgumentParser) -> None:
     src = p.add_mutually_exclusive_group(required=True)
     src.add_argument("path", nargs="?", type=Path, help="project directory or deployment zip to scan")
     src.add_argument("--function", metavar="FUNCTION",
-                     help="deployed function to scan: name, ARN, or partial ARN (downloads code and layers); give a version or alias with --qualifier")
+                     help="deployed function to scan: name, ARN, or partial ARN, optionally ending in :VERSION_OR_ALIAS (downloads code and layers)")
     p.add_argument("--qualifier", help="version or alias, with --function")
     p.add_argument("--project", type=Path, help="directory holding lambda-tools.json (default: PATH, or current directory)")
     p.add_argument("--fail-on", choices=config.FAIL_ON_CHOICES, help="lowest severity that fails (default: low)")
@@ -192,6 +192,7 @@ def run(args: argparse.Namespace, sess_factory) -> int:
     policy = policy_from(cfg, args.fail_on)
     client = OsvClient()
     if args.function:
+        args.function, args.qualifier = aws.split_qualifier(args.function, args.qualifier)
         target, trees, notes, gaps, runtime = function_trees(sess_factory(cfg), args.function, args.qualifier, cfg)
     elif backupdir.is_backup(args.path):
         target, trees, notes, gaps, runtime = backup_trees(args.path)
