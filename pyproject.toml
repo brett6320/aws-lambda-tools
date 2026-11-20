@@ -9,8 +9,8 @@ description = "Back up, scan, remediate, and package AWS Lambda functions"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "boto3>=1.43.127",
-    "botocore>=1.43.127",
+    "boto3>=1.44.4",
+    "botocore>=1.44.4",
     "packaging>=26.3",
     "truststore>=0.10.5",
 ]
